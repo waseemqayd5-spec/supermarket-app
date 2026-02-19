@@ -1,9 +1,8 @@
-from flask import Flask, render_template_string, request, redirect, session, url_for
+from flask import Flask, render_template_string, request, redirect
 import sqlite3
 import os
 
 app = Flask(__name__)
-app.secret_key = "verysecretkey123"  # 🔐 لتشفير الجلسة وحماية لوحة المدير
 
 DB = "data/store.db"
 os.makedirs("data", exist_ok=True)
@@ -53,29 +52,10 @@ def home():
     return render_template_string(CUSTOMER_TEMPLATE, categories=categories, products_by_category=products_by_category)
 
 # -------------------------
-# صفحة تسجيل الدخول للمدير
-# -------------------------
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    if request.method == "POST":
-        username = request.form.get("username")
-        password = request.form.get("password")
-        # عدّل هنا اسم المستخدم وكلمة المرور
-        if username == "admin" and password == "123456":
-            session["logged_in"] = True
-            return redirect(url_for("admin"))
-        else:
-            return render_template_string(LOGIN_TEMPLATE, error="اسم المستخدم أو كلمة المرور خاطئة")
-    return render_template_string(LOGIN_TEMPLATE, error="")
-
-# -------------------------
-# لوحة المدير المحمية
+# لوحة المدير مباشرة
 # -------------------------
 @app.route("/admin", methods=["GET", "POST"])
 def admin():
-    if not session.get("logged_in"):
-        return redirect(url_for("login"))
-
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     
@@ -100,20 +80,10 @@ def admin():
     return render_template_string(ADMIN_TEMPLATE, categories=categories, products=products)
 
 # -------------------------
-# تسجيل الخروج من لوحة المدير
-# -------------------------
-@app.route("/logout")
-def logout():
-    session.pop("logged_in", None)
-    return redirect(url_for("login"))
-
-# -------------------------
 # حذف فئة
 # -------------------------
 @app.route("/delete_category/<int:id>")
 def delete_category(id):
-    if not session.get("logged_in"):
-        return redirect(url_for("login"))
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("DELETE FROM categories WHERE id=?", (id,))
@@ -126,8 +96,6 @@ def delete_category(id):
 # -------------------------
 @app.route("/delete_product/<int:id>")
 def delete_product(id):
-    if not session.get("logged_in"):
-        return redirect(url_for("login"))
     conn = sqlite3.connect(DB)
     c = conn.cursor()
     c.execute("DELETE FROM products WHERE id=?", (id,))
@@ -154,6 +122,7 @@ h1{margin:0}
 button{background:#FFD700;color:black;border:none;padding:5px 10px;cursor:pointer}
 input{padding:5px;margin:3px 0;width:95%}
 footer{text-align:center;margin-top:30px;padding:20px;border-top:1px solid #FFD700;font-size:12px}
+.admin-btn{margin-top:20px;padding:10px 20px;background:#FFD700;color:black;border:none;cursor:pointer}
 </style>
 <script>
 let cart=[];
@@ -187,6 +156,10 @@ function showInvoice(){
 
     window.open("https://wa.me/967770295876?text="+encodeURIComponent(text));
 }
+
+function openAdmin(){
+    window.location.href="/admin";
+}
 </script>
 </head>
 <body>
@@ -216,6 +189,8 @@ function showInvoice(){
 <input id="location" placeholder="موقعك"><br><br>
 
 <button onclick="showInvoice()">ارسال الى واتساب</button>
+<br>
+<button class="admin-btn" onclick="openAdmin()">لوحة المدير</button>
 
 </div>
 
@@ -226,31 +201,6 @@ function showInvoice(){
 للتواصل 967770295876
 </footer>
 
-</body>
-</html>
-"""
-
-LOGIN_TEMPLATE = """
-<!DOCTYPE html>
-<html dir="rtl">
-<head>
-<meta charset="UTF-8">
-<title>تسجيل دخول المدير</title>
-<style>
-body{font-family:Tahoma;background:#000;color:#FFD700;text-align:center;padding:50px}
-input{padding:5px;margin:5px;width:200px}
-button{padding:5px 10px;background:#FFD700;color:black;border:none;cursor:pointer}
-.error{color:red;margin:10px}
-</style>
-</head>
-<body>
-<h2>تسجيل دخول المدير</h2>
-<form method="POST">
-<input name="username" placeholder="اسم المستخدم"><br>
-<input type="password" name="password" placeholder="كلمة المرور"><br>
-<button>دخول</button>
-</form>
-<div class="error">{{error}}</div>
 </body>
 </html>
 """
@@ -293,7 +243,6 @@ ADMIN_TEMPLATE = """
 <a href="/delete_product/{{p[0]}}">حذف</a><br>
 {% endfor %}
 
-<br><a href="/logout">تسجيل الخروج</a>
 </body>
 </html>
 """
