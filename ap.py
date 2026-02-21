@@ -1,35 +1,54 @@
 from flask import Flask, render_template_string, request, redirect, session, url_for
-import sqlite3
 import os
+import psycopg2
+from urllib.parse import urlparse
 
 app = Flask(__name__)
 app.secret_key = "verysecretkey123"  # 🔐 لتشفير الجلسة
 
-DB = "data/store.db"
-os.makedirs("data", exist_ok=True)
+# -------------------------
+# ربط قاعدة بيانات PostgreSQL
+# -------------------------
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise Exception("DATABASE_URL غير معرف في Environment Variables")
+
+# تحليل الرابط للحصول على معلومات الاتصال
+url = urlparse(DATABASE_URL)
+DB_CONFIG = {
+    "dbname": url.path[1:],
+    "user": url.username,
+    "password": url.password,
+    "host": url.hostname,
+    "port": url.port
+}
+
+def get_conn():
+    return psycopg2.connect(**DB_CONFIG)
 
 # -------------------------
 # تهيئة قاعدة البيانات
 # -------------------------
 def init_db():
-    if not os.path.exists(DB):
-        conn = sqlite3.connect(DB)
-        c = conn.cursor()
-        c.execute("""
-        CREATE TABLE categories (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS categories (
+            id SERIAL PRIMARY KEY,
             name TEXT
-        )""")
-        c.execute("""
-        CREATE TABLE products (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+        );
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS products (
+            id SERIAL PRIMARY KEY,
             name TEXT,
             price REAL,
-            category_id INTEGER,
-            FOREIGN KEY(category_id) REFERENCES categories(id)
-        )""")
-        conn.commit()
-        conn.close()
+            category_id INTEGER REFERENCES categories(id)
+        );
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
 
 init_db()
 
@@ -38,33 +57,32 @@ init_db()
 # -------------------------
 @app.route("/", methods=["GET"])
 def home():
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("SELECT * FROM categories")
-    categories = c.fetchall()
-    
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM categories")
+    categories = cur.fetchall()
+
     products_by_category = {}
     for cat in categories:
-        c.execute("SELECT * FROM products WHERE category_id=?", (cat[0],))
-        products_by_category[cat[0]] = c.fetchall()
-    
+        cur.execute("SELECT * FROM products WHERE category_id=%s", (cat[0],))
+        products_by_category[cat[0]] = cur.fetchall()
+
+    cur.close()
     conn.close()
-    
-    return render_template_string(CUSTOMER_TEMPLATE, categories=categories, products_by_category=products_by_category)
+    return render_template_string(CUSTOMER_TEMPLATE,
+                                  categories=categories,
+                                  products_by_category=products_by_category)
 
 # -------------------------
-# صفحة تسجيل الدخول للمدير
+# تسجيل الدخول للمدير
 # -------------------------
 @app.route("/login", methods=["GET", "POST"])
 def login():
     error = ""
     if request.method == "POST":
-        username = request.form.get("username")
-        password = request.form.get("password")
-        # عدّل اسم المستخدم وكلمة المرور هنا
-        if username == "admin" and password == "123456":
+        if request.form.get("username") == "admin" and request.form.get("password") == "123456":
             session["logged_in"] = True
-            return redirect(url_for("admin"))
+            return redirect("/admin")
         else:
             error = "اسم المستخدم أو كلمة المرور خاطئة"
     return render_template_string(LOGIN_TEMPLATE, error=error)
@@ -75,71 +93,76 @@ def login():
 @app.route("/admin", methods=["GET", "POST"])
 def admin():
     if not session.get("logged_in"):
-        return redirect(url_for("login"))
+        return redirect("/login")
 
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    
+    conn = get_conn()
+    cur = conn.cursor()
+
     if request.method == "POST":
         if "category_name" in request.form:
-            c.execute("INSERT INTO categories (name) VALUES (?)", (request.form["category_name"],))
+            cur.execute("INSERT INTO categories (name) VALUES (%s)", (request.form["category_name"],))
         if "product_name" in request.form:
-            c.execute("INSERT INTO products (name, price, category_id) VALUES (?,?,?)",
-                      (request.form["product_name"], request.form["price"], request.form["category_id"]))
+            cur.execute(
+                "INSERT INTO products (name, price, category_id) VALUES (%s, %s, %s)",
+                (request.form["product_name"], request.form["price"], request.form["category_id"])
+            )
         conn.commit()
-    
-    c.execute("SELECT * FROM categories")
-    categories = c.fetchall()
-    
-    c.execute("""SELECT products.id, products.name, products.price, categories.name
-                 FROM products
-                 JOIN categories ON products.category_id = categories.id""")
-    products = c.fetchall()
-    
+
+    cur.execute("SELECT * FROM categories")
+    categories = cur.fetchall()
+
+    cur.execute("""
+        SELECT products.id, products.name, products.price, categories.name
+        FROM products
+        JOIN categories ON products.category_id = categories.id
+    """)
+    products = cur.fetchall()
+
+    cur.close()
     conn.close()
-    
-    return render_template_string(ADMIN_TEMPLATE, categories=categories, products=products)
+
+    return render_template_string(ADMIN_TEMPLATE,
+                                  categories=categories,
+                                  products=products)
+
+# -------------------------
+# حذف فئة / منتج
+# -------------------------
+@app.route("/delete_category/<int:id>")
+def delete_category(id):
+    if not session.get("logged_in"):
+        return redirect("/login")
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM categories WHERE id=%s", (id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return redirect("/admin")
+
+@app.route("/delete_product/<int:id>")
+def delete_product(id):
+    if not session.get("logged_in"):
+        return redirect("/login")
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM products WHERE id=%s", (id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return redirect("/admin")
 
 # -------------------------
 # تسجيل الخروج
 # -------------------------
 @app.route("/logout")
 def logout():
-    session.pop("logged_in", None)
+    session.clear()
     return redirect("/")
 
 # -------------------------
-# حذف فئة
-# -------------------------
-@app.route("/delete_category/<int:id>")
-def delete_category(id):
-    if not session.get("logged_in"):
-        return redirect(url_for("login"))
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("DELETE FROM categories WHERE id=?", (id,))
-    conn.commit()
-    conn.close()
-    return redirect("/admin")
-
-# -------------------------
-# حذف منتج
-# -------------------------
-@app.route("/delete_product/<int:id>")
-def delete_product(id):
-    if not session.get("logged_in"):
-        return redirect(url_for("login"))
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute("DELETE FROM products WHERE id=?", (id,))
-    conn.commit()
-    conn.close()
-    return redirect("/admin")
-
-# =========================
 # قوالب HTML
-# =========================
-
+# -------------------------
 CUSTOMER_TEMPLATE = """
 <!DOCTYPE html>
 <html dir="rtl">
@@ -159,51 +182,39 @@ footer{text-align:center;margin-top:30px;padding:20px;border-top:1px solid #FFD7
 </style>
 <script>
 let cart=[];
-
 function addToCart(name,price){
     cart.push({name:name,price:price});
     alert("تمت الإضافة للسلة");
 }
-
 function showInvoice(){
     let customer=document.getElementById("customer").value;
     let phone=document.getElementById("phone").value;
     let location=document.getElementById("location").value;
-
     if(!customer || !phone || !location){
         alert("يرجى إدخال بياناتك كاملة");
         return;
     }
-
     let text="🛒 سوبر ماركت أولاد قايد محمد\\n";
     text+="الاسم: "+customer+"\\n";
     text+="الرقم: "+phone+"\\n";
     text+="الموقع: "+location+"\\n\\n";
-
     let total=0;
     cart.forEach(item=>{
         text+=item.name+" - "+item.price+" ريال\\n";
         total+=parseFloat(item.price);
     });
     text+="\\nالإجمالي: "+total+" ريال";
-
     window.open("https://wa.me/967770295876?text="+encodeURIComponent(text));
 }
-
-function openAdmin(){
-    window.location.href="/login";
-}
+function openAdmin(){ window.location.href="/login"; }
 </script>
 </head>
 <body>
-
 <header>
 <h1>سوبر ماركت أولاد قايد محمد</h1>
 <p>أولاد قايد للتجارة العامة</p>
 </header>
-
 <div style="padding:15px">
-
 {% for cat in categories %}
 <div class="category">
 <h3>{{cat[1]}}</h3>
@@ -215,25 +226,20 @@ function openAdmin(){
 {% endfor %}
 </div>
 {% endfor %}
-
 <h3>بيانات الزبون</h3>
 <input id="customer" placeholder="اسمك"><br>
 <input id="phone" placeholder="رقمك"><br>
 <input id="location" placeholder="موقعك"><br><br>
-
 <button onclick="showInvoice()">ارسال الى واتساب</button>
 <br>
 <button class="admin-btn" onclick="openAdmin()">لوحة المدير</button>
-
 </div>
-
 <footer>
 📍 الازرق / موعد حماده : حبيل تود<br>
 لصاحبها «فايز / وإخوانه»<br>
 إعداد وتصميم «م / وسيم العامري»<br>
 للتواصل 967770295876
 </footer>
-
 </body>
 </html>
 """
@@ -277,7 +283,6 @@ ADMIN_TEMPLATE = """
 <input name="category_name" placeholder="اسم الفئة">
 <button>إضافة</button>
 </form>
-
 <h2>إضافة منتج</h2>
 <form method="POST">
 <input name="product_name" placeholder="اسم المنتج">
@@ -289,18 +294,15 @@ ADMIN_TEMPLATE = """
 </select>
 <button>إضافة</button>
 </form>
-
 <h2>الفئات</h2>
 {% for c in categories %}
 {{c[1]}} <a href="/delete_category/{{c[0]}}">حذف</a><br>
 {% endfor %}
-
 <h2>المنتجات</h2>
 {% for p in products %}
 {{p[1]}} - {{p[2]}} ريال ({{p[3]}})
 <a href="/delete_product/{{p[0]}}">حذف</a><br>
 {% endfor %}
-
 <br><a href="/logout">تسجيل الخروج</a>
 </body>
 </html>
@@ -311,4 +313,4 @@ ADMIN_TEMPLATE = """
 # -------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    app.run(host="0.0.0.0", port=port, debug=False)
