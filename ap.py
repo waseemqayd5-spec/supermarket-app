@@ -1,309 +1,286 @@
-from flask import Flask, render_template_string, request, redirect, session, url_for
+# app.py
+from flask import Flask, render_template_string, request, redirect, session, url_for, flash
 import os
 import psycopg2
-from urllib.parse import urlparse
 
 app = Flask(__name__)
-app.secret_key = "verysecretkey123"  # 🔐 لتشفير الجلسة
+app.secret_key = "supermarket_secret_key_2026"
 
 # -------------------------
-# ربط قاعدة بيانات PostgreSQL
+# الاتصال بقاعدة البيانات PostgreSQL
 # -------------------------
-DATABASE_URL = os.environ.get("DATABASE_URL")
-if not DATABASE_URL:
-    raise Exception("DATABASE_URL غير معرف في Environment Variables")
+DB_URL = os.getenv("DATABASE_URL")  # URL من Environment Variable
 
-# تحليل الرابط للحصول على معلومات الاتصال
-url = urlparse(DATABASE_URL)
-DB_CONFIG = {
-    "dbname": url.path[1:],
-    "user": url.username,
-    "password": url.password,
-    "host": url.hostname,
-    "port": url.port
-}
-
-def get_conn():
-    return psycopg2.connect(**DB_CONFIG)
+def get_connection():
+    return psycopg2.connect(DB_URL)
 
 # -------------------------
 # تهيئة قاعدة البيانات
 # -------------------------
 def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS categories (
-            id SERIAL PRIMARY KEY,
-            name TEXT
-        );
+    conn = get_connection()
+    c = conn.cursor()
+
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS categories (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL
+    )
     """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS products (
-            id SERIAL PRIMARY KEY,
-            name TEXT,
-            price REAL,
-            category_id INTEGER REFERENCES categories(id)
-        );
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS products (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        price REAL NOT NULL,
+        category_id INTEGER REFERENCES categories(id)
+    )
     """)
     conn.commit()
-    cur.close()
+    c.close()
     conn.close()
 
 init_db()
 
 # -------------------------
-# الصفحة الرئيسية (واجهة الزبون)
+# الصفحة الرئيسية للزبائن
 # -------------------------
-@app.route("/", methods=["GET"])
+@app.route("/")
 def home():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM categories")
-    categories = cur.fetchall()
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM categories ORDER BY name")
+    categories = c.fetchall()
 
     products_by_category = {}
     for cat in categories:
-        cur.execute("SELECT * FROM products WHERE category_id=%s", (cat[0],))
-        products_by_category[cat[0]] = cur.fetchall()
+        c.execute("SELECT * FROM products WHERE category_id=%s ORDER BY name", (cat[0],))
+        products_by_category[cat[0]] = c.fetchall()
 
-    cur.close()
     conn.close()
-    return render_template_string(CUSTOMER_TEMPLATE,
+
+    return render_template_string(HOME_TEMPLATE,
                                   categories=categories,
                                   products_by_category=products_by_category)
 
 # -------------------------
-# تسجيل الدخول للمدير
+# تسجيل الدخول
 # -------------------------
 @app.route("/login", methods=["GET", "POST"])
 def login():
     error = ""
     if request.method == "POST":
-        if request.form.get("username") == "admin" and request.form.get("password") == "123456":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "").strip()
+        if username == "admin" and password == "123456":
             session["logged_in"] = True
+            flash("تم تسجيل الدخول بنجاح", "success")
             return redirect("/admin")
         else:
-            error = "اسم المستخدم أو كلمة المرور خاطئة"
+            error = "اسم المستخدم أو كلمة المرور غير صحيحة"
     return render_template_string(LOGIN_TEMPLATE, error=error)
 
 # -------------------------
-# لوحة المدير
+# لوحة الإدارة
 # -------------------------
 @app.route("/admin", methods=["GET", "POST"])
 def admin():
     if not session.get("logged_in"):
         return redirect("/login")
 
-    conn = get_conn()
-    cur = conn.cursor()
+    conn = get_connection()
+    c = conn.cursor()
 
     if request.method == "POST":
-        if "category_name" in request.form:
-            cur.execute("INSERT INTO categories (name) VALUES (%s)", (request.form["category_name"],))
-        if "product_name" in request.form:
-            cur.execute(
-                "INSERT INTO products (name, price, category_id) VALUES (%s, %s, %s)",
-                (request.form["product_name"], request.form["price"], request.form["category_id"])
-            )
+        # إضافة فئة جديدة
+        if "category_name" in request.form and request.form["category_name"].strip() != "":
+            c.execute("INSERT INTO categories (name) VALUES (%s)", (request.form["category_name"],))
+            flash("تمت إضافة الفئة بنجاح", "success")
+        # إضافة منتج جديد
+        if "product_name" in request.form and request.form["product_name"].strip() != "":
+            c.execute("INSERT INTO products (name, price, category_id) VALUES (%s,%s,%s)",
+                      (request.form["product_name"],
+                       float(request.form["price"]),
+                       int(request.form["category_id"])))
+            flash("تمت إضافة المنتج بنجاح", "success")
         conn.commit()
 
-    cur.execute("SELECT * FROM categories")
-    categories = cur.fetchall()
+    # جلب البيانات للعرض
+    c.execute("SELECT * FROM categories ORDER BY name")
+    categories = c.fetchall()
 
-    cur.execute("""
-        SELECT products.id, products.name, products.price, categories.name
-        FROM products
-        JOIN categories ON products.category_id = categories.id
+    c.execute("""
+    SELECT products.id, products.name, products.price, categories.name
+    FROM products
+    JOIN categories ON products.category_id = categories.id
+    ORDER BY products.name
     """)
-    products = cur.fetchall()
-
-    cur.close()
+    products = c.fetchall()
     conn.close()
 
-    return render_template_string(ADMIN_TEMPLATE,
-                                  categories=categories,
-                                  products=products)
+    return render_template_string(ADMIN_TEMPLATE, categories=categories, products=products)
 
 # -------------------------
-# حذف فئة / منتج
+# حذف
 # -------------------------
 @app.route("/delete_category/<int:id>")
 def delete_category(id):
     if not session.get("logged_in"):
         return redirect("/login")
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM categories WHERE id=%s", (id,))
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM categories WHERE id=%s", (id,))
     conn.commit()
-    cur.close()
     conn.close()
+    flash("تم حذف الفئة بنجاح", "warning")
     return redirect("/admin")
 
 @app.route("/delete_product/<int:id>")
 def delete_product(id):
     if not session.get("logged_in"):
         return redirect("/login")
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM products WHERE id=%s", (id,))
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM products WHERE id=%s", (id,))
     conn.commit()
-    cur.close()
     conn.close()
+    flash("تم حذف المنتج بنجاح", "warning")
     return redirect("/admin")
 
-# -------------------------
-# تسجيل الخروج
-# -------------------------
 @app.route("/logout")
 def logout():
     session.clear()
+    flash("تم تسجيل الخروج", "info")
     return redirect("/")
 
 # -------------------------
-# قوالب HTML
+# قوالب HTML مع Bootstrap
 # -------------------------
-CUSTOMER_TEMPLATE = """
+
+HOME_TEMPLATE = """
 <!DOCTYPE html>
-<html dir="rtl">
+<html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>سوبر ماركت أولاد قايد</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
 <style>
-body{background:#000;color:#FFD700;font-family:Tahoma;margin:0;padding:0}
-header{text-align:center;padding:20px}
-h1{margin:0}
-.category{margin:15px;padding:10px;border:1px solid #FFD700}
-.product{display:flex;justify-content:space-between;margin:5px 0}
-button{background:#FFD700;color:black;border:none;padding:5px 10px;cursor:pointer}
-input{padding:5px;margin:3px 0;width:95%}
-footer{text-align:center;margin-top:30px;padding:20px;border-top:1px solid #FFD700;font-size:12px}
-.admin-btn{margin-top:20px;padding:10px 20px;background:#FFD700;color:black;border:none;cursor:pointer}
+body { background-color: #000; color: #FFD700; }
+h1, h3 { text-align:center; }
+hr { border-color: #FFD700; }
+a { color: #FFD700; }
 </style>
-<script>
-let cart=[];
-function addToCart(name,price){
-    cart.push({name:name,price:price});
-    alert("تمت الإضافة للسلة");
-}
-function showInvoice(){
-    let customer=document.getElementById("customer").value;
-    let phone=document.getElementById("phone").value;
-    let location=document.getElementById("location").value;
-    if(!customer || !phone || !location){
-        alert("يرجى إدخال بياناتك كاملة");
-        return;
-    }
-    let text="🛒 سوبر ماركت أولاد قايد محمد\\n";
-    text+="الاسم: "+customer+"\\n";
-    text+="الرقم: "+phone+"\\n";
-    text+="الموقع: "+location+"\\n\\n";
-    let total=0;
-    cart.forEach(item=>{
-        text+=item.name+" - "+item.price+" ريال\\n";
-        total+=parseFloat(item.price);
-    });
-    text+="\\nالإجمالي: "+total+" ريال";
-    window.open("https://wa.me/967770295876?text="+encodeURIComponent(text));
-}
-function openAdmin(){ window.location.href="/login"; }
-</script>
 </head>
 <body>
-<header>
+<div class="container mt-4">
 <h1>سوبر ماركت أولاد قايد محمد</h1>
-<p>أولاد قايد للتجارة العامة</p>
-</header>
-<div style="padding:15px">
 {% for cat in categories %}
-<div class="category">
-<h3>{{cat[1]}}</h3>
-{% for p in products_by_category[cat[0]] %}
-<div class="product">
-<span>{{p[1]}} - {{p[2]}} ريال</span>
-<button onclick="addToCart('{{p[1]}}','{{p[2]}}')">إضافة</button>
+<div class="card bg-dark text-warning mb-3">
+  <div class="card-header">{{cat[1]}}</div>
+  <div class="card-body">
+    {% for p in products_by_category[cat[0]] %}
+    <p>{{p[1]}} - {{p[2]}} ريال</p>
+    {% endfor %}
+  </div>
 </div>
 {% endfor %}
+<div class="text-center"><a href="/login" class="btn btn-warning text-dark">لوحة المدير</a></div>
 </div>
-{% endfor %}
-<h3>بيانات الزبون</h3>
-<input id="customer" placeholder="اسمك"><br>
-<input id="phone" placeholder="رقمك"><br>
-<input id="location" placeholder="موقعك"><br><br>
-<button onclick="showInvoice()">ارسال الى واتساب</button>
-<br>
-<button class="admin-btn" onclick="openAdmin()">لوحة المدير</button>
-</div>
-<footer>
-📍 الازرق / موعد حماده : حبيل تود<br>
-لصاحبها «فايز / وإخوانه»<br>
-إعداد وتصميم «م / وسيم العامري»<br>
-للتواصل 967770295876
-</footer>
 </body>
 </html>
 """
 
 LOGIN_TEMPLATE = """
 <!DOCTYPE html>
-<html dir="rtl">
+<html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
-<title>تسجيل دخول المدير</title>
-<style>
-body{font-family:Tahoma;background:#000;color:#FFD700;text-align:center;padding:50px}
-input{padding:5px;margin:5px;width:200px}
-button{padding:5px 10px;background:#FFD700;color:black;border:none;cursor:pointer}
-.error{color:red;margin:10px}
-</style>
+<title>تسجيل الدخول</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
+<style>body{background-color:#000;color:#FFD700;}</style>
 </head>
 <body>
-<h2>تسجيل دخول المدير</h2>
-<form method="POST">
-<input name="username" placeholder="اسم المستخدم"><br>
-<input type="password" name="password" placeholder="كلمة المرور"><br>
-<button>دخول</button>
+<div class="container mt-5">
+<h2>تسجيل الدخول</h2>
+<form method="POST" class="mb-3">
+<div class="mb-3"><input name="username" class="form-control" placeholder="اسم المستخدم"></div>
+<div class="mb-3"><input type="password" name="password" class="form-control" placeholder="كلمة المرور"></div>
+<button class="btn btn-warning text-dark">دخول</button>
 </form>
-<div class="error">{{error}}</div>
+{% if error %}<div class="alert alert-danger">{{error}}</div>{% endif %}
+</div>
 </body>
 </html>
 """
 
 ADMIN_TEMPLATE = """
 <!DOCTYPE html>
-<html dir="rtl">
+<html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
-<title>لوحة المدير</title>
-<style>input, select{margin:5px;padding:5px}</style>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>لوحة الإدارة</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
+<style>body{background-color:#000;color:#FFD700;}</style>
 </head>
 <body>
-<h2>إضافة فئة</h2>
-<form method="POST">
-<input name="category_name" placeholder="اسم الفئة">
-<button>إضافة</button>
+<div class="container mt-4">
+<h2>لوحة الإدارة</h2>
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% if messages %}
+    {% for category, message in messages %}
+      <div class="alert alert-{{ category }}">{{ message }}</div>
+    {% endfor %}
+  {% endif %}
+{% endwith %}
+
+<h3>إضافة فئة جديدة</h3>
+<form method="POST" class="mb-4">
+<div class="input-group">
+<input name="category_name" class="form-control" placeholder="اسم الفئة">
+<button class="btn btn-warning text-dark">إضافة</button>
+</div>
 </form>
-<h2>إضافة منتج</h2>
-<form method="POST">
-<input name="product_name" placeholder="اسم المنتج">
-<input name="price" placeholder="السعر">
-<select name="category_id">
+
+<h3>إضافة منتج جديد</h3>
+<form method="POST" class="mb-4">
+<div class="input-group mb-2">
+<input name="product_name" class="form-control" placeholder="اسم المنتج">
+<input name="price" class="form-control" placeholder="السعر">
+<select name="category_id" class="form-select">
 {% for c in categories %}
 <option value="{{c[0]}}">{{c[1]}}</option>
 {% endfor %}
 </select>
-<button>إضافة</button>
+<button class="btn btn-warning text-dark">إضافة</button>
+</div>
 </form>
-<h2>الفئات</h2>
-{% for c in categories %}
-{{c[1]}} <a href="/delete_category/{{c[0]}}">حذف</a><br>
-{% endfor %}
-<h2>المنتجات</h2>
+
+<h3>المنتجات الحالية</h3>
+<table class="table table-dark table-striped">
+<thead>
+<tr>
+<th>الاسم</th><th>السعر</th><th>الفئة</th><th>حذف</th>
+</tr>
+</thead>
+<tbody>
 {% for p in products %}
-{{p[1]}} - {{p[2]}} ريال ({{p[3]}})
-<a href="/delete_product/{{p[0]}}">حذف</a><br>
+<tr>
+<td>{{p[1]}}</td>
+<td>{{p[2]}}</td>
+<td>{{p[3]}}</td>
+<td><a href="/delete_product/{{p[0]}}" class="btn btn-danger btn-sm">حذف</a></td>
+</tr>
 {% endfor %}
-<br><a href="/logout">تسجيل الخروج</a>
+</tbody>
+</table>
+
+<div class="mt-3">
+<a href="/logout" class="btn btn-secondary">تسجيل الخروج</a>
+</div>
+
+</div>
 </body>
 </html>
 """
@@ -312,5 +289,5 @@ ADMIN_TEMPLATE = """
 # تشغيل التطبيق
 # -------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
