@@ -1,5 +1,4 @@
-Flask
-gunicorn
-gspread
-google-auth-oauthlib
-google-auth
+Flask==2.3.2
+Flask-Login==0.6.2
+psycopg2-binary==2.9.6
+Werkzeug==2.3.6
