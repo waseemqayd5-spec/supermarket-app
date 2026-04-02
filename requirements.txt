@@ -1,7 +1,8 @@
-Flask==3.1.2
-moviepy==2.2.1
-gTTS==2.5.4
-elevenlabs==2.41.0
-opencv-python==4.11.0.86
-pillow==11.2.1
-requests==2.32.3
+Flask==2.3.3
+moviepy==1.0.3
+gTTS==2.3.2
+opencv-python==4.8.1.78
+Pillow==10.0.1
+requests==2.31.0
+waitress==2.1.2
+elevenlabs==0.2.26
