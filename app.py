@@ -1,56 +1,106 @@
 import os
+import sys
 import uuid
 import time
 from flask import Flask, request, jsonify, send_file, render_template_string
-from moviepy import VideoClip, AudioFileClip, CompositeVideoClip, TextClip, ColorClip
-from gtts import gTTS
-from PIL import Image, ImageDraw, ImageFont
 
+# ==================================================
+# تأكد من استيراد المكتبات مع معالجة الأخطاء
+# ==================================================
+try:
+    from moviepy import VideoClip, AudioFileClip, CompositeVideoClip, TextClip, ColorClip
+except ImportError:
+    print("ERROR: moviepy not installed. Run: pip install moviepy")
+    sys.exit(1)
+
+try:
+    from gtts import gTTS
+except ImportError:
+    print("ERROR: gTTS not installed. Run: pip install gtts")
+    sys.exit(1)
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:
+    print("ERROR: Pillow not installed. Run: pip install pillow")
+    sys.exit(1)
+
+# ElevenLabs اختياري
+try:
+    from elevenlabs import generate, set_api_key, Voice, VoiceSettings
+    ELEVENLABS_AVAILABLE = True
+except ImportError:
+    ELEVENLABS_AVAILABLE = False
+    print("Warning: elevenlabs not installed. Voice will use gTTS only.")
+
+# ==================================================
+# إعداد التطبيق والمجلدات
+# ==================================================
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
 
-# إعداد المجلدات
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(BASE_DIR, 'static')
 OUTPUT_DIR = os.path.join(STATIC_DIR, 'output')
 AVATARS_DIR = os.path.join(STATIC_DIR, 'avatars')
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(AVATARS_DIR, exist_ok=True)
 
-# إنشاء صورة افتراضية
+# إنشاء المجلدات مع التحقق من الصلاحيات
+try:
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(AVATARS_DIR, exist_ok=True)
+    print(f"Directories created: {OUTPUT_DIR}, {AVATARS_DIR}")
+except Exception as e:
+    print(f"ERROR creating directories: {e}")
+    sys.exit(1)
+
+# إنشاء صورة افتراضية (Avatar)
 def create_default_avatar():
     default_path = os.path.join(AVATARS_DIR, 'default.png')
     if not os.path.exists(default_path):
-        img = Image.new('RGB', (400, 400), color=(73, 109, 137))
-        d = ImageDraw.Draw(img)
         try:
-            font = ImageFont.truetype("arial.ttf", 40)
-        except IOError:
-            font = ImageFont.load_default()
-        d.text((100, 180), "AI Avatar", fill=(255, 255, 255), font=font)
-        img.save(default_path)
+            img = Image.new('RGB', (400, 400), color=(73, 109, 137))
+            d = ImageDraw.Draw(img)
+            try:
+                font = ImageFont.truetype("arial.ttf", 40)
+            except IOError:
+                font = ImageFont.load_default()
+            d.text((100, 180), "AI Avatar", fill=(255, 255, 255), font=font)
+            img.save(default_path)
+            print(f"Default avatar created at {default_path}")
+        except Exception as e:
+            print(f"Failed to create default avatar: {e}")
+            return None
     return default_path
 
 DEFAULT_AVATAR_PATH = create_default_avatar()
+if DEFAULT_AVATAR_PATH is None:
+    print("WARNING: No avatar will be used.")
 
+# ==================================================
+# دوال مساعدة لإنشاء الفيديو
+# ==================================================
 def generate_audio(text, output_path, use_elevenlabs=False, elevenlabs_api_key=None):
-    if use_elevenlabs and elevenlabs_api_key:
+    if use_elevenlabs and elevenlabs_api_key and ELEVENLABS_AVAILABLE:
         try:
-            from elevenlabs import generate, set_api_key, Voice, VoiceSettings
             set_api_key(elevenlabs_api_key)
             audio_data = generate(
                 text=text,
-                voice=Voice(voice_id='EXAVITQu4vrTQcpA88OZ',
-                            settings=VoiceSettings(stability=0.35, similarity_boost=0.75))
+                voice=Voice(
+                    voice_id='EXAVITQu4vrTQcpA88OZ',
+                    settings=VoiceSettings(stability=0.35, similarity_boost=0.75)
+                )
             )
             with open(output_path, 'wb') as f:
                 f.write(audio_data)
+            print(f"Audio generated with ElevenLabs: {output_path}")
             return output_path
         except Exception as e:
             print(f"ElevenLabs error: {e}. Falling back to gTTS.")
+    # استخدام gTTS
     tts = gTTS(text=text, lang='ar')
     tts.save(output_path)
+    print(f"Audio generated with gTTS: {output_path}")
     return output_path
 
 def create_video_from_text(text, output_path, duration=5, avatar_path=None, bg_color='black', text_color='white'):
@@ -82,6 +132,7 @@ def create_video_from_text(text, output_path, duration=5, avatar_path=None, bg_c
 
     final_video = CompositeVideoClip(clips)
     final_video.write_videofile(output_path, fps=24, codec='libx264', audio_codec='aac')
+    print(f"Video created (static text): {output_path}")
     return output_path
 
 def create_video_with_audio(text, audio_path, output_path, avatar_path=None, bg_color='black', text_color='white'):
@@ -120,9 +171,12 @@ def create_video_with_audio(text, audio_path, output_path, avatar_path=None, bg_
     final_video = CompositeVideoClip(clips)
     final_video = final_video.with_audio(audio_clip)
     final_video.write_videofile(output_path, fps=24, codec='libx264', audio_codec='aac')
+    print(f"Video created (synced text): {output_path}")
     return output_path
 
-# واجهة HTML مضمنة
+# ==================================================
+# واجهة HTML مضمنة (نفس السابق ولكن مختصر قليلاً)
+# ==================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -415,12 +469,17 @@ HTML_TEMPLATE = """
 </html>
 """
 
+# ==================================================
+# نقاط النهاية (Routes)
+# ==================================================
 @app.route('/')
 def index():
+    print("Serving index page")
     return render_template_string(HTML_TEMPLATE)
 
 @app.route('/generate', methods=['POST'])
 def generate_video():
+    print("Received /generate request")
     data = request.get_json()
     if not data or 'text' not in data:
         return jsonify({'error': 'الرجاء إدخال النص'}), 400
@@ -447,7 +506,7 @@ def generate_video():
             else:
                 duration = float(data.get('duration', 5))
                 create_video_from_text(text, video_path, duration, avatar_path, bg_color, text_color)
-                # إضافة الصوت
+                # إضافة الصوت إلى الفيديو الثابت
                 video_clip = VideoClip.from_file(video_path)
                 audio_clip = AudioFileClip(audio_path).with_duration(video_clip.duration)
                 final_clip = video_clip.with_audio(audio_clip)
@@ -459,6 +518,7 @@ def generate_video():
         video_url = url_for('download_video', filename=os.path.basename(video_path), _external=True)
         return jsonify({'success': True, 'video_url': video_url, 'message': 'تم إنشاء الفيديو بنجاح!'})
     except Exception as e:
+        print(f"Error in /generate: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/download/<filename>')
@@ -479,6 +539,18 @@ def cleanup():
             deleted_count += 1
     return jsonify({'message': f'تم حذف {deleted_count} ملف قديم'})
 
+# ==================================================
+# تشغيل الخادم (مع منفذ ثابت وطباعة تأكيد)
+# ==================================================
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    # استخدام المنفذ 10000 مباشرة (كما تطلبه Render)
+    port = 10000
+    # أو يمكن قراءته من متغير البيئة PORT إذا وُجد
+    if 'PORT' in os.environ:
+        port = int(os.environ['PORT'])
+    
+    print(f"Starting Flask server on 0.0.0.0:{port}")
+    print(f"Open http://localhost:{port} in your browser")
+    
+    # Run with debug=False and use_reloader=False لتجنب مشاكل المنافذ
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
