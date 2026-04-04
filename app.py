@@ -5,7 +5,7 @@ import time
 from flask import Flask, request, jsonify, send_file, render_template_string
 
 # ============================
-# محاولة استيراد المكتبات مع التعامل مع الأخطاء
+# استيراد المكتبات
 # ============================
 try:
     from moviepy import VideoClip, AudioFileClip, CompositeVideoClip, TextClip, ColorClip
@@ -63,7 +63,9 @@ def create_default_avatar():
 
 DEFAULT_AVATAR = create_default_avatar()
 
-# دوال إنشاء الفيديو (نفس الكود السابق مع تحسينات بسيطة)
+# ============================
+# دوال إنشاء الفيديو حسب النمط
+# ============================
 def generate_audio(text, out_path, use_elevenlabs=False, api_key=None):
     if use_elevenlabs and api_key and ELEVENLABS_AVAILABLE:
         try:
@@ -79,67 +81,140 @@ def generate_audio(text, out_path, use_elevenlabs=False, api_key=None):
     tts.save(out_path)
     return out_path
 
-def create_video_simple(text, out_path, duration=5, avatar=None, bg='black', txt_color='white'):
+def create_video_simple(text, out_path, duration=5, avatar=None, style='عادي', txt_color=None, bg_color=None):
     w, h = 640, 480
     avatar_path = avatar if (avatar and os.path.exists(avatar)) else DEFAULT_AVATAR
-    bg_clip = ColorClip(size=(w,h), color=bg, duration=duration)
-    txt_clip = TextClip(font="Arial", text=text, font_size=30, color=txt_color,
-                        bg_color='rgba(0,0,0,0.6)', size=(w-100, None),
+    
+    # تحديد الألوان حسب النمط
+    if style == 'كرتوني':
+        bg_color = bg_color or '#FFE066'  # أصفر فاتح
+        txt_color = txt_color or '#FF5733'  # برتقالي
+        font_size = 40
+        font_name = "Comic Sans MS"
+    elif style == 'سينمائي':
+        bg_color = bg_color or '#1A1A1A'  # أسود داكن
+        txt_color = txt_color or '#F5F5DC'  # بيج
+        font_size = 36
+        font_name = "Georgia"
+    elif style == 'أغنية':
+        bg_color = bg_color or '#2C3E50'  # أزرق داكن
+        txt_color = txt_color or '#F1C40F'  # ذهبي
+        font_size = 38
+        font_name = "Arial"
+    else:  # عادي
+        bg_color = bg_color or 'black'
+        txt_color = txt_color or 'white'
+        font_size = 30
+        font_name = "Arial"
+    
+    # خلفية
+    bg_clip = ColorClip(size=(w,h), color=bg_color, duration=duration)
+    
+    # إضافة تأثير سينمائي (شريط أسود أعلى وأسفل)
+    clips = [bg_clip]
+    if style == 'سينمائي':
+        bar_height = 60
+        top_bar = ColorClip(size=(w, bar_height), color='black', duration=duration).with_position(('center', 0))
+        bottom_bar = ColorClip(size=(w, bar_height), color='black', duration=duration).with_position(('center', h - bar_height))
+        clips.extend([top_bar, bottom_bar])
+    
+    # النص
+    txt_clip = TextClip(font=font_name, text=text, font_size=font_size, color=txt_color,
+                        bg_color='rgba(0,0,0,0.5)', size=(w-100, None),
                         method='caption', text_align='center'
                        ).with_position(('center', h-150)).with_duration(duration)
-    clips = [bg_clip, txt_clip]
-    if avatar_path:
+    clips.append(txt_clip)
+    
+    # الصورة الرمزية (إذا وجدت)
+    if avatar_path and style != 'سينمائي':  # السينمائي لا يحتوي صورة رمزية عادة
         try:
             av_clip = VideoClip.from_image(avatar_path, duration=duration).resized(height=150)
             av_clip = av_clip.with_position(('center', 50))
             clips.append(av_clip)
         except:
             pass
+    
     final = CompositeVideoClip(clips)
     final.write_videofile(out_path, fps=24, codec='libx264', audio_codec='aac')
     return out_path
 
-def create_video_synced(text, audio_path, out_path, avatar=None, bg='black', txt_color='white'):
+def create_video_synced(text, audio_path, out_path, avatar=None, style='عادي', txt_color=None, bg_color=None):
     w, h = 640, 480
     audio_clip = AudioFileClip(audio_path)
     duration = audio_clip.duration
     avatar_path = avatar if (avatar and os.path.exists(avatar)) else DEFAULT_AVATAR
-    bg_clip = ColorClip(size=(w,h), color=bg, duration=duration)
+    
+    # تحديد الألوان حسب النمط
+    if style == 'كرتوني':
+        bg_color = bg_color or '#FFE066'
+        txt_color = txt_color or '#FF5733'
+        font_size = 40
+        font_name = "Comic Sans MS"
+    elif style == 'سينمائي':
+        bg_color = bg_color or '#1A1A1A'
+        txt_color = txt_color or '#F5F5DC'
+        font_size = 36
+        font_name = "Georgia"
+    elif style == 'أغنية':
+        bg_color = bg_color or '#2C3E50'
+        txt_color = txt_color or '#F1C40F'
+        font_size = 38
+        font_name = "Arial"
+    else:
+        bg_color = bg_color or 'black'
+        txt_color = txt_color or 'white'
+        font_size = 30
+        font_name = "Arial"
+    
+    bg_clip = ColorClip(size=(w,h), color=bg_color, duration=duration)
+    clips = [bg_clip]
+    
+    # تأثير سينمائي
+    if style == 'سينمائي':
+        bar_height = 60
+        top_bar = ColorClip(size=(w, bar_height), color='black', duration=duration).with_position(('center', 0))
+        bottom_bar = ColorClip(size=(w, bar_height), color='black', duration=duration).with_position(('center', h - bar_height))
+        clips.extend([top_bar, bottom_bar])
+    
+    # تقطيع النص إلى كلمات متزامنة
     words = text.split()
     seg = duration / len(words) if words else duration
     txt_clips = []
     for i, word in enumerate(words):
-        clip = TextClip(font="Arial", text=word, font_size=30, color=txt_color,
-                        bg_color='rgba(0,0,0,0.6)', size=(w-100, None), method='caption'
+        clip = TextClip(font=font_name, text=word, font_size=font_size, color=txt_color,
+                        bg_color='rgba(0,0,0,0.5)', size=(w-100, None), method='caption'
                        ).with_position(('center', h-150)).with_start(i*seg).with_duration(seg)
         txt_clips.append(clip)
-    clips = [bg_clip] + txt_clips
-    if avatar_path:
+    clips.extend(txt_clips)
+    
+    # الصورة الرمزية
+    if avatar_path and style != 'سينمائي':
         try:
             av_clip = VideoClip.from_image(avatar_path, duration=duration).resized(height=150)
             av_clip = av_clip.with_position(('center', 50))
             clips.append(av_clip)
         except:
             pass
+    
     final = CompositeVideoClip(clips).with_audio(audio_clip)
     final.write_videofile(out_path, fps=24, codec='libx264', audio_codec='aac')
     return out_path
 
 # ============================
-# واجهة HTML مضمنة (مختصرة لكنها كاملة)
+# واجهة HTML مضمنة مع إضافة خيار النمط
 # ============================
 HTML = """
 <!DOCTYPE html>
 <html dir="rtl" lang="ar">
-<head><meta charset="UTF-8"><title>توليد فيديو من النص</title>
+<head><meta charset="UTF-8"><title>توليد فيديو من النص - أنماط متعددة</title>
 <style>
 body{font-family:Tahoma;background:linear-gradient(135deg,#667eea,#764ba2);padding:20px;}
-.container{max-width:800px;margin:auto;background:#fff;border-radius:20px;overflow:hidden;}
+.container{max-width:900px;margin:auto;background:#fff;border-radius:20px;overflow:hidden;}
 .header{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:30px;text-align:center;}
 .content{padding:30px;}
 .form-group{margin-bottom:20px;}
 label{display:block;font-weight:bold;margin-bottom:8px;}
-textarea,select,input{width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;}
+textarea,select,input{width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;font-size:16px;}
 .row{display:grid;grid-template-columns:1fr 1fr;gap:15px;}
 button{width:100%;padding:15px;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;border:none;border-radius:10px;font-size:18px;cursor:pointer;}
 .loading{display:none;text-align:center;padding:20px;background:#f8f9fa;border-radius:10px;margin-top:20px;}
@@ -147,31 +222,42 @@ button{width:100%;padding:15px;background:linear-gradient(135deg,#667eea,#764ba2
 @keyframes spin{0%{transform:rotate(0deg);}100%{transform:rotate(360deg);}}
 .result{display:none;margin-top:20px;padding:20px;background:#d4edda;border-radius:10px;text-align:center;}
 .error{display:none;background:#f8d7da;color:#721c24;border-radius:10px;padding:15px;margin-top:20px;}
+.info{background:#e7f3ff;padding:15px;border-radius:10px;margin-top:20px;font-size:14px;color:#004085;}
 @media(max-width:600px){.row{grid-template-columns:1fr;}}
 </style>
 </head>
 <body>
 <div class="container">
-<div class="header"><h1>🎬 تحويل النص إلى فيديو</h1><p>بتقنيات الذكاء الاصطناعي</p></div>
+<div class="header"><h1>🎬 تحويل النص إلى فيديو</h1><p>اختر النمط الذي تريده: كرتوني، سينمائي، عادي، أو أغنية</p></div>
 <div class="content">
 <div class="form-group"><label>📝 النص</label><textarea id="text" rows="4" placeholder="اكتب النص هنا..."></textarea></div>
 <div class="row">
-<div class="form-group"><label>🎨 لون الخلفية</label><select id="bg"><option value="black">أسود</option><option value="white">أبيض</option><option value="navy">أزرق</option></select></div>
-<div class="form-group"><label>✏️ لون النص</label><select id="color"><option value="white">أبيض</option><option value="yellow">أصفر</option></select></div>
-</div>
-<div class="row">
+<div class="form-group"><label>🎨 النمط</label><select id="style">
+<option value="عادي">عادي</option>
+<option value="كرتوني">كرتوني</option>
+<option value="سينمائي">سينمائي</option>
+<option value="أغنية">أغنية</option>
+</select></div>
 <div class="form-group"><label>🖼️ الصورة الرمزية</label><select id="avatar"><option value="default">افتراضي</option><option value="none">إخفاء</option></select></div>
-<div class="form-group"><label>🎬 النوع</label><select id="type"><option value="static">نص ثابت</option><option value="synced">متزامن مع الصوت</option></select></div>
 </div>
 <div class="row">
-<div class="form-group"><label>⏱️ المدة (ثواني)</label><input type="number" id="duration" value="5" min="3" max="30"></div>
-<div class="form-group"><label>🔊 صوت</label><select id="tts"><option value="true">نعم</option><option value="false">لا</option></select></div>
+<div class="form-group"><label>🎬 نوع التزامن</label><select id="type"><option value="static">نص ثابت</option><option value="synced">متزامن مع الصوت</option></select></div>
+<div class="form-group"><label>⏱️ المدة (ثواني) - للنص الثابت</label><input type="number" id="duration" value="5" min="3" max="30"></div>
 </div>
-<div id="eleven" style="display:none;"><div class="form-group"><label>🎙️ مفتاح ElevenLabs (اختياري)</label><input type="password" id="key" placeholder="API Key"></div></div>
+<div class="row">
+<div class="form-group"><label>🔊 تحويل النص إلى صوت</label><select id="tts"><option value="true">نعم</option><option value="false">لا</option></select></div>
+<div class="form-group"><label>🎨 لون الخلفية (اختياري)</label><input type="text" id="bg_color" placeholder="مثل: #FF0000 أو red"></div>
+</div>
+<div class="row">
+<div class="form-group"><label>✏️ لون النص (اختياري)</label><input type="text" id="txt_color" placeholder="مثل: #FFFFFF أو white"></div>
+<div></div>
+</div>
+<div id="eleven" style="display:none;"><div class="form-group"><label>🎙️ مفتاح ElevenLabs (اختياري لجودة صوت أفضل)</label><input type="password" id="key" placeholder="API Key"></div></div>
 <button id="generate">🚀 إنشاء الفيديو</button>
-<div class="loading" id="loading"><div class="spinner"></div><p>جاري الإنشاء...</p></div>
+<div class="loading" id="loading"><div class="spinner"></div><p>جاري إنشاء الفيديو... قد يستغرق بضع ثوانٍ</p></div>
 <div class="result" id="result"></div>
 <div class="error" id="error"></div>
+<div class="info">💡 نصيحة: للفيديوهات الطويلة أو المعقدة، قد يستغرق المعالجة وقتاً أطول قليلاً.</div>
 </div></div>
 <script>
 const ttsSel=document.getElementById('tts'); const elevenDiv=document.getElementById('eleven');
@@ -180,9 +266,14 @@ document.getElementById('generate').onclick=async()=>{
 const text=document.getElementById('text').value.trim();
 if(!text){showError('أدخل النص');return;}
 const data={
-text:text,bg_color:document.getElementById('bg').value,text_color:document.getElementById('color').value,
-avatar:document.getElementById('avatar').value,video_type:document.getElementById('type').value,
-duration:parseFloat(document.getElementById('duration').value),use_tts:ttsSel.value==='true',
+text:text,
+style:document.getElementById('style').value,
+bg_color:document.getElementById('bg_color').value || null,
+text_color:document.getElementById('txt_color').value || null,
+avatar:document.getElementById('avatar').value,
+video_type:document.getElementById('type').value,
+duration:parseFloat(document.getElementById('duration').value),
+use_tts:ttsSel.value==='true',
 use_elevenlabs:ttsSel.value==='true' && document.getElementById('key').value!=='',
 elevenlabs_api_key:document.getElementById('key').value||null
 };
@@ -195,7 +286,7 @@ if(json.success){showResult(json.video_url);}else{showError(json.error||'خطأ'
 finally{showLoading(false);}
 };
 function showLoading(s){document.getElementById('loading').style.display=s?'block':'none';document.getElementById('generate').disabled=s;}
-function showResult(url){const div=document.getElementById('result');div.innerHTML=`<p>✅ تم الإنشاء</p><a href="${url}" download>تحميل الفيديو</a><br><video width="100%" controls><source src="${url}" type="video/mp4"></video>`;div.style.display='block';}
+function showResult(url){const div=document.getElementById('result');div.innerHTML=`<p>✅ تم الإنشاء</p><a href="${url}" download>📥 تحميل الفيديو</a><br><br><video width="100%" controls><source src="${url}" type="video/mp4"></video>`;div.style.display='block';}
 function hideResult(){document.getElementById('result').style.display='none';}
 function showError(msg){const e=document.getElementById('error');e.innerHTML=`❌ ${msg}`;e.style.display='block';}
 function hideError(){document.getElementById('error').style.display='none';}
@@ -215,12 +306,13 @@ def generate():
         return jsonify({'error': 'لا يوجد نص'}), 400
 
     text = data['text']
+    style = data.get('style', 'عادي')
     use_tts = data.get('use_tts', True)
     use_eleven = data.get('use_elevenlabs', False)
     key = data.get('elevenlabs_api_key')
     avatar = None if data.get('avatar') == 'none' else DEFAULT_AVATAR
-    bg = data.get('bg_color', 'black')
-    txtcol = data.get('text_color', 'white')
+    bg_color = data.get('bg_color')
+    txt_color = data.get('text_color')
     vid_type = data.get('video_type', 'static')
     duration = float(data.get('duration', 5))
 
@@ -232,16 +324,16 @@ def generate():
         if use_tts:
             generate_audio(text, audio_path, use_eleven, key)
             if vid_type == 'synced':
-                create_video_synced(text, audio_path, video_path, avatar, bg, txtcol)
+                create_video_synced(text, audio_path, video_path, avatar, style, txt_color, bg_color)
             else:
-                create_video_simple(text, video_path, duration, avatar, bg, txtcol)
+                create_video_simple(text, video_path, duration, avatar, style, txt_color, bg_color)
                 # إضافة الصوت للفيديو الثابت
                 vid = VideoClip.from_file(video_path)
                 aud = AudioFileClip(audio_path).with_duration(vid.duration)
                 final = vid.with_audio(aud)
                 final.write_videofile(video_path, codec='libx264', audio_codec='aac')
         else:
-            create_video_simple(text, video_path, duration, avatar, bg, txtcol)
+            create_video_simple(text, video_path, duration, avatar, style, txt_color, bg_color)
 
         url = url_for('download', filename=os.path.basename(video_path), _external=True)
         return jsonify({'success': True, 'video_url': url})
@@ -262,5 +354,4 @@ def download(filename):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     print(f"Starting server on 0.0.0.0:{port}")
-    # استخدام use_reloader=False لتجنب مشاكل المنافذ
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
