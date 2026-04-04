@@ -35,6 +35,62 @@ except ImportError:
     print("Note: elevenlabs not installed (optional)")
 
 # ============================
+# دالة مساعدة لتحويل اللون إلى RGB tuple
+# ============================
+def color_to_rgb(color):
+    """تحويل اسم اللون أو رمز Hex إلى tuple (R,G,B)"""
+    if color is None:
+        return (0, 0, 0)  # أسود افتراضي
+    if isinstance(color, tuple):
+        return color
+    if isinstance(color, str):
+        color = color.strip().lower()
+        # أسماء الألوان الأساسية
+        named_colors = {
+            'black': (0, 0, 0),
+            'white': (255, 255, 255),
+            'red': (255, 0, 0),
+            'green': (0, 255, 0),
+            'blue': (0, 0, 255),
+            'yellow': (255, 255, 0),
+            'cyan': (0, 255, 255),
+            'magenta': (255, 0, 255),
+            'navy': (0, 0, 128),
+            'darkgreen': (0, 100, 0),
+            'purple': (128, 0, 128),
+            'orange': (255, 165, 0),
+            'pink': (255, 192, 203),
+            'brown': (165, 42, 42),
+            'gray': (128, 128, 128),
+            'lightblue': (173, 216, 230),
+            'lightgreen': (144, 238, 144),
+            'gold': (255, 215, 0),
+            'silver': (192, 192, 192),
+            'beige': (245, 245, 220),
+            'coral': (255, 127, 80),
+            'lavender': (230, 230, 250),
+            'turquoise': (64, 224, 208),
+            # ألوان الأنماط المخصصة
+            '#FFE066': (255, 224, 102),
+            '#FF5733': (255, 87, 51),
+            '#1A1A1A': (26, 26, 26),
+            '#F5F5DC': (245, 245, 220),
+            '#2C3E50': (44, 62, 80),
+            '#F1C40F': (241, 196, 15),
+        }
+        if color in named_colors:
+            return named_colors[color]
+        # محاولة تحويل رمز Hex مثل #FFFFFF أو FFFFFF
+        if color.startswith('#'):
+            color = color[1:]
+        if len(color) == 6 and all(c in '0123456789ABCDEFabcdef' for c in color):
+            return (int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16))
+        if len(color) == 3 and all(c in '0123456789ABCDEFabcdef' for c in color):
+            return (int(color[0]*2, 16), int(color[1]*2, 16), int(color[2]*2, 16))
+    # القيمة الافتراضية
+    return (0, 0, 0)
+
+# ============================
 # إعداد Flask والمجلدات
 # ============================
 app = Flask(__name__)
@@ -63,9 +119,7 @@ def create_default_avatar():
 
 DEFAULT_AVATAR = create_default_avatar()
 
-# ============================
-# دوال إنشاء الفيديو حسب النمط
-# ============================
+# دوال إنشاء الفيديو
 def generate_audio(text, out_path, use_elevenlabs=False, api_key=None):
     if use_elevenlabs and api_key and ELEVENLABS_AVAILABLE:
         try:
@@ -85,48 +139,48 @@ def create_video_simple(text, out_path, duration=5, avatar=None, style='عادي
     w, h = 640, 480
     avatar_path = avatar if (avatar and os.path.exists(avatar)) else DEFAULT_AVATAR
     
-    # تحديد الألوان حسب النمط
+    # تحديد الألوان والأحجام حسب النمط (مع تحويل إلى RGB)
     if style == 'كرتوني':
-        bg_color = bg_color or '#FFE066'  # أصفر فاتح
-        txt_color = txt_color or '#FF5733'  # برتقالي
+        bg_rgb = color_to_rgb(bg_color or '#FFE066')
+        txt_rgb = color_to_rgb(txt_color or '#FF5733')
         font_size = 40
         font_name = "Comic Sans MS"
     elif style == 'سينمائي':
-        bg_color = bg_color or '#1A1A1A'  # أسود داكن
-        txt_color = txt_color or '#F5F5DC'  # بيج
+        bg_rgb = color_to_rgb(bg_color or '#1A1A1A')
+        txt_rgb = color_to_rgb(txt_color or '#F5F5DC')
         font_size = 36
         font_name = "Georgia"
     elif style == 'أغنية':
-        bg_color = bg_color or '#2C3E50'  # أزرق داكن
-        txt_color = txt_color or '#F1C40F'  # ذهبي
+        bg_rgb = color_to_rgb(bg_color or '#2C3E50')
+        txt_rgb = color_to_rgb(txt_color or '#F1C40F')
         font_size = 38
         font_name = "Arial"
     else:  # عادي
-        bg_color = bg_color or 'black'
-        txt_color = txt_color or 'white'
+        bg_rgb = color_to_rgb(bg_color or 'black')
+        txt_rgb = color_to_rgb(txt_color or 'white')
         font_size = 30
         font_name = "Arial"
     
     # خلفية
-    bg_clip = ColorClip(size=(w,h), color=bg_color, duration=duration)
-    
-    # إضافة تأثير سينمائي (شريط أسود أعلى وأسفل)
+    bg_clip = ColorClip(size=(w,h), color=bg_rgb, duration=duration)
     clips = [bg_clip]
+    
+    # تأثير سينمائي (شريط أسود)
     if style == 'سينمائي':
         bar_height = 60
-        top_bar = ColorClip(size=(w, bar_height), color='black', duration=duration).with_position(('center', 0))
-        bottom_bar = ColorClip(size=(w, bar_height), color='black', duration=duration).with_position(('center', h - bar_height))
+        top_bar = ColorClip(size=(w, bar_height), color=(0,0,0), duration=duration).with_position(('center', 0))
+        bottom_bar = ColorClip(size=(w, bar_height), color=(0,0,0), duration=duration).with_position(('center', h - bar_height))
         clips.extend([top_bar, bottom_bar])
     
     # النص
-    txt_clip = TextClip(font=font_name, text=text, font_size=font_size, color=txt_color,
-                        bg_color='rgba(0,0,0,0.5)', size=(w-100, None),
+    txt_clip = TextClip(font=font_name, text=text, font_size=font_size, color=txt_rgb,
+                        bg_color=(0,0,0,0.5), size=(w-100, None),
                         method='caption', text_align='center'
                        ).with_position(('center', h-150)).with_duration(duration)
     clips.append(txt_clip)
     
-    # الصورة الرمزية (إذا وجدت)
-    if avatar_path and style != 'سينمائي':  # السينمائي لا يحتوي صورة رمزية عادة
+    # الصورة الرمزية
+    if avatar_path and style != 'سينمائي':
         try:
             av_clip = VideoClip.from_image(avatar_path, duration=duration).resized(height=150)
             av_clip = av_clip.with_position(('center', 50))
@@ -146,43 +200,43 @@ def create_video_synced(text, audio_path, out_path, avatar=None, style='عادي
     
     # تحديد الألوان حسب النمط
     if style == 'كرتوني':
-        bg_color = bg_color or '#FFE066'
-        txt_color = txt_color or '#FF5733'
+        bg_rgb = color_to_rgb(bg_color or '#FFE066')
+        txt_rgb = color_to_rgb(txt_color or '#FF5733')
         font_size = 40
         font_name = "Comic Sans MS"
     elif style == 'سينمائي':
-        bg_color = bg_color or '#1A1A1A'
-        txt_color = txt_color or '#F5F5DC'
+        bg_rgb = color_to_rgb(bg_color or '#1A1A1A')
+        txt_rgb = color_to_rgb(txt_color or '#F5F5DC')
         font_size = 36
         font_name = "Georgia"
     elif style == 'أغنية':
-        bg_color = bg_color or '#2C3E50'
-        txt_color = txt_color or '#F1C40F'
+        bg_rgb = color_to_rgb(bg_color or '#2C3E50')
+        txt_rgb = color_to_rgb(txt_color or '#F1C40F')
         font_size = 38
         font_name = "Arial"
     else:
-        bg_color = bg_color or 'black'
-        txt_color = txt_color or 'white'
+        bg_rgb = color_to_rgb(bg_color or 'black')
+        txt_rgb = color_to_rgb(txt_color or 'white')
         font_size = 30
         font_name = "Arial"
     
-    bg_clip = ColorClip(size=(w,h), color=bg_color, duration=duration)
+    bg_clip = ColorClip(size=(w,h), color=bg_rgb, duration=duration)
     clips = [bg_clip]
     
     # تأثير سينمائي
     if style == 'سينمائي':
         bar_height = 60
-        top_bar = ColorClip(size=(w, bar_height), color='black', duration=duration).with_position(('center', 0))
-        bottom_bar = ColorClip(size=(w, bar_height), color='black', duration=duration).with_position(('center', h - bar_height))
+        top_bar = ColorClip(size=(w, bar_height), color=(0,0,0), duration=duration).with_position(('center', 0))
+        bottom_bar = ColorClip(size=(w, bar_height), color=(0,0,0), duration=duration).with_position(('center', h - bar_height))
         clips.extend([top_bar, bottom_bar])
     
-    # تقطيع النص إلى كلمات متزامنة
+    # تقطيع النص
     words = text.split()
     seg = duration / len(words) if words else duration
     txt_clips = []
     for i, word in enumerate(words):
-        clip = TextClip(font=font_name, text=word, font_size=font_size, color=txt_color,
-                        bg_color='rgba(0,0,0,0.5)', size=(w-100, None), method='caption'
+        clip = TextClip(font=font_name, text=word, font_size=font_size, color=txt_rgb,
+                        bg_color=(0,0,0,0.5), size=(w-100, None), method='caption'
                        ).with_position(('center', h-150)).with_start(i*seg).with_duration(seg)
         txt_clips.append(clip)
     clips.extend(txt_clips)
@@ -201,7 +255,7 @@ def create_video_synced(text, audio_path, out_path, avatar=None, style='عادي
     return out_path
 
 # ============================
-# واجهة HTML مضمنة مع إضافة خيار النمط
+# واجهة HTML (كما هي مع إضافة خيارات النمط)
 # ============================
 HTML = """
 <!DOCTYPE html>
@@ -348,9 +402,6 @@ def download(filename):
         return send_file(path, as_attachment=True)
     return jsonify({'error': 'ملف غير موجود'}), 404
 
-# ============================
-# تشغيل الخادم
-# ============================
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     print(f"Starting server on 0.0.0.0:{port}")
