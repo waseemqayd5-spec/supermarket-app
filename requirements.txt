@@ -1,8 +1,5 @@
-flask
-moviepy
-gtts
-pillow
-gunicorn
-imageio
-imageio-ffmpeg
-numpy
+Flask==3.1.2
+moviepy==2.2.1
+gTTS==2.5.4
+Pillow==11.2.1
+gunicorn==23.0.0
