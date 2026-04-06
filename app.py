@@ -1,385 +1,397 @@
 import os
+import sys
 import uuid
 import time
 from flask import Flask, request, jsonify, send_file, render_template_string
 
-# --- 1. 导入必要的库 ---
+# ==================================================
+# 1. استيراد المكتبات الأساسية
+# ==================================================
 try:
     from moviepy import VideoClip, AudioFileClip, CompositeVideoClip, TextClip, ColorClip
+    MOVIEPY_AVAILABLE = True
+except ImportError:
+    MOVIEPY_AVAILABLE = False
+    print("ERROR: moviepy not installed. Run: pip install moviepy")
+    sys.exit(1)
+
+try:
     from gtts import gTTS
+    GTTS_AVAILABLE = True
+except ImportError:
+    GTTS_AVAILABLE = False
+    print("ERROR: gTTS not installed. Run: pip install gtts")
+    sys.exit(1)
+
+try:
     from PIL import Image, ImageDraw, ImageFont
-    import numpy as np
-except ImportError as e:
-    print(f"启动失败，缺少必要库: {e}")
-    print("请确保运行了安装命令: apt-get update && apt-get install -y ffmpeg && pip install flask gTTS moviepy Pillow")
-    exit(1)
+    PILLOW_AVAILABLE = True
+except ImportError:
+    PILLOW_AVAILABLE = False
+    print("ERROR: Pillow not installed. Run: pip install pillow")
+    sys.exit(1)
 
-# --- 2. 初始化 Flask 应用 ---
+# ==================================================
+# 2. إعداد تطبيق Flask
+# ==================================================
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key')
+app.config['SECRET_KEY'] = 'your-secret-key-here'
 
-# 创建必要的文件夹
+# إنشاء المجلدات اللازمة لتخزين الملفات المؤقتة
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_DIR = os.path.join(BASE_DIR, 'static', 'output')
+STATIC_DIR = os.path.join(BASE_DIR, 'static')
+OUTPUT_DIR = os.path.join(STATIC_DIR, 'output')
+AVATARS_DIR = os.path.join(STATIC_DIR, 'avatars')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+os.makedirs(AVATARS_DIR, exist_ok=True)
 
-# --- 3. 核心视频生成函数 ---
-def create_text_animation_video(text, output_path, duration=10, bg_color='#2c3e50', text_color='white'):
+# ==================================================
+# 3. دوال مساعدة لمعالجة الألوان والخطوط
+# ==================================================
+def color_to_rgb(color):
+    """تحويل اسم اللون أو رمز Hex إلى قيمة RGB مفهومة من مكتبة MoviePy."""
+    if color is None:
+        return (0, 0, 0)
+    if isinstance(color, tuple):
+        return color
+    if isinstance(color, str):
+        color = color.strip().lower()
+        # قاموس الألوان الأساسية
+        named_colors = {
+            'أسود': (0,0,0), 'أبيض': (255,255,255), 'أحمر': (255,0,0),
+            'أخضر': (0,255,0), 'أزرق': (0,0,255), 'أصفر': (255,255,0),
+            'برتقالي': (255,165,0), 'وردي': (255,192,203), 'بني': (165,42,42),
+            'رمادي': (128,128,128), 'ذهبي': (255,215,0), 'فضي': (192,192,192),
+            'بنفسجي': (128,0,128), 'فيروزي': (64,224,208),
+            'black': (0,0,0), 'white': (255,255,255), 'red': (255,0,0),
+        }
+        if color in named_colors:
+            return named_colors[color]
+        # دعم رموز Hex مثل #FF0000
+        if color.startswith('#'):
+            color = color[1:]
+            if len(color) == 6:
+                return (int(color[0:2],16), int(color[2:4],16), int(color[4:6],16))
+    return (0,0,0)
+
+def get_font_for_style(style):
+    """اختيار اسم خط مناسب حسب النمط المطلوب."""
+    fonts = {
+        'كرتوني': 'DejaVuSans',
+        'سينمائي': 'DejaVuSerif',
+        'أغنية': 'DejaVuSans',
+        'عادي': 'DejaVuSans'
+    }
+    return fonts.get(style, 'DejaVuSans')
+
+# ==================================================
+# 4. دوال إنشاء الفيديو (قلب التطبيق)
+# ==================================================
+def create_default_avatar():
+    """إنشاء صورة رمزية افتراضية إذا لم تكن موجودة."""
+    path = os.path.join(AVATARS_DIR, 'default.png')
+    if not os.path.exists(path) and PILLOW_AVAILABLE:
+        img = Image.new('RGB', (400,400), (73,109,137))
+        d = ImageDraw.Draw(img)
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", 40)
+        except:
+            font = ImageFont.load_default()
+        d.text((100,180), "AI Avatar", fill=(255,255,255), font=font)
+        img.save(path)
+    return path if os.path.exists(path) else None
+
+DEFAULT_AVATAR = create_default_avatar()
+
+def generate_audio(text, output_path):
+    """تحويل النص إلى ملف صوتي mp3 باستخدام مكتبة gTTS."""
+    if GTTS_AVAILABLE:
+        tts = gTTS(text=text, lang='ar')
+        tts.save(output_path)
+        return output_path
+    return None
+
+def create_video_simple(text, output_path, duration=5, style='عادي', txt_color=None, bg_color=None, audio_path=None):
     """
-    使用 MoviePy 创建带有文字动画的视频
+    الطريقة الأساسية لصنع الفيديو.
+    تقوم بإنشاء خلفية ثابتة، وإضافة النص عليها، ثم دمج الصوت إذا وُجد.
     """
-    # 视频参数
-    w, h = 1280, 720  # 16:9 高清分辨率
-    fps = 24
+    w, h = 640, 480  # دقة الفيديو
+    bg_rgb = color_to_rgb(bg_color)
+    txt_rgb = color_to_rgb(txt_color)
 
-    # 1. 生成音频 (Text-to-Speech)
-    audio_path = output_path.replace('.mp4', '_audio.mp3')
-    tts = gTTS(text=text, lang='ar')  # 使用阿拉伯语，可修改为 'en', 'zh-cn' 等
-    tts.save(audio_path)
-    audio_clip = AudioFileClip(audio_path)
-    final_duration = max(duration, audio_clip.duration)  # 确保视频时长至少和音频一样长
+    # ضبط حجم ولون الخط حسب النمط المختار
+    if style == 'كرتوني':
+        if bg_color is None: bg_rgb = color_to_rgb('#FFE066')
+        if txt_color is None: txt_rgb = color_to_rgb('#FF5733')
+        font_size = 40
+    elif style == 'سينمائي':
+        if bg_color is None: bg_rgb = color_to_rgb('#1A1A1A')
+        if txt_color is None: txt_rgb = color_to_rgb('#F5F5DC')
+        font_size = 36
+    elif style == 'أغنية':
+        if bg_color is None: bg_rgb = color_to_rgb('#2C3E50')
+        if txt_color is None: txt_rgb = color_to_rgb('#F1C40F')
+        font_size = 38
+    else:  # نمط عادي
+        if bg_color is None: bg_rgb = color_to_rgb('أسود')
+        if txt_color is None: txt_rgb = color_to_rgb('أبيض')
+        font_size = 30
 
-    # 2. 创建动态字幕 (水平滚动动画)
-    # 使用 lambda 函数定义文字位置，实现从右向左的滚动效果
-    text_clip = (TextClip(font="Arial", text=text, font_size=70, color=text_color,
-                          bg_color=(0,0,0,0.6), size=(w*2, None), method='caption', text_align='center')
-                 .with_position(lambda t: (max(0, w - int(w * t / final_duration)), h/2))
-                 .with_duration(final_duration))
+    font_name = get_font_for_style(style)
+    # طبقة الخلفية
+    bg_clip = ColorClip(size=(w, h), color=bg_rgb, duration=duration)
+    clips = [bg_clip]
 
-    # 3. 创建背景 (纯色背景 + 简单光晕效果)
-    # 创建一个渐变背景，使其更有质感
-    bg_clip = ColorClip(size=(w, h), color=bg_color, duration=final_duration)
-    # 添加一个简单的光晕效果：创建一个半透明的、更大的圆形并缓慢缩放
-    glow_size = 300
-    glow_center = (w//2, h//2)
-    glow_clip = (ColorClip(size=(glow_size, glow_size), color=(255,255,255))
-                 .with_opacity(0.1)
-                 .with_position(lambda t: (glow_center[0] + 50*np.sin(t), glow_center[1] + 50*np.cos(t)))
-                 .with_duration(final_duration))
+    # إضافة تأثير الشريط الأسود للنمط السينمائي
+    if style == 'سينمائي':
+        bar_h = 60
+        top_bar = ColorClip(size=(w, bar_h), color=(0,0,0), duration=duration).with_position(('center', 0))
+        bottom_bar = ColorClip(size=(w, bar_h), color=(0,0,0), duration=duration).with_position(('center', h - bar_h))
+        clips.extend([top_bar, bottom_bar])
 
-    # 4. 合成所有元素
-    final_clip = CompositeVideoClip([bg_clip, glow_clip, text_clip])
-    final_clip = final_clip.with_audio(audio_clip)
+    # طبقة النص الرئيسية
+    txt_clip = TextClip(
+        font=font_name, text=text, font_size=font_size, color=txt_rgb,
+        bg_color=(0,0,0,0.5), size=(w-100, None),
+        method='caption', text_align='center'
+    ).with_position(('center', h-150)).with_duration(duration)
+    clips.append(txt_clip)
 
-    # 5. 输出视频文件
-    final_clip.write_videofile(output_path, fps=fps, codec='libx264', audio_codec='aac', threads=4)
+    # إضافة الصورة الرمزية (لجميع الأنماط ما عدا السينمائي)
+    if DEFAULT_AVATAR and style != 'سينمائي':
+        try:
+            avatar_clip = VideoClip.from_image(DEFAULT_AVATAR, duration=duration).resized(height=150)
+            avatar_clip = avatar_clip.with_position(('center', 50))
+            clips.append(avatar_clip)
+        except:
+            pass
 
-    # 清理临时音频文件
-    if os.path.exists(audio_path):
-        os.remove(audio_path)
+    final_video = CompositeVideoClip(clips)
+    # دمج الصوت إذا كان موجودًا
+    if audio_path and os.path.exists(audio_path):
+        audio_clip = AudioFileClip(audio_path).with_duration(final_video.duration)
+        final_video = final_video.with_audio(audio_clip)
 
+    final_video.write_videofile(output_path, fps=24, codec='libx264', audio_codec='aac')
     return output_path
 
-# --- 4. 网页前端 (HTML + CSS + JS) ---
-# 为了单文件部署，我们将 HTML 代码内嵌在 Python 字符串中
+def create_video_synced(text, audio_path, output_path, style='عادي', txt_color=None, bg_color=None):
+    """
+    طريقة متقدمة لصنع الفيديو.
+    تعمل على مزامنة ظهور كل كلمة من النص مع توقيت الصوت، مما ينتج تأثير "أغنية" أو "فيديو متحرك".
+    """
+    w, h = 640, 480
+    audio_clip = AudioFileClip(audio_path)
+    duration = audio_clip.duration
+    bg_rgb = color_to_rgb(bg_color)
+    txt_rgb = color_to_rgb(txt_color)
+
+    # ضبط الألوان والحجم حسب النمط (نفس المنطق في الدالة السابقة)
+    if style == 'كرتوني':
+        if bg_color is None: bg_rgb = color_to_rgb('#FFE066')
+        if txt_color isNone: txt_rgb = color_to_rgb('#FF5733')
+        font_size = 40
+    elif style == 'سينمائي':
+        if bg_color is None: bg_rgb = color_to_rgb('#1A1A1A')
+        if txt_color is None: txt_rgb = color_to_rgb('#F5F5DC')
+        font_size = 36
+    elif style == 'أغنية':
+        if bg_color is None: bg_rgb = color_to_rgb('#2C3E50')
+        if txt_color is None: txt_rgb = color_to_rgb('#F1C40F')
+        font_size = 38
+    else:
+        if bg_color is None: bg_rgb = color_to_rgb('أسود')
+        if txt_color is None: txt_rgb = color_to_rgb('أبيض')
+        font_size = 30
+
+    font_name = get_font_for_style(style)
+    bg_clip = ColorClip(size=(w,h), color=bg_rgb, duration=duration)
+    clips = [bg_clip]
+
+    if style == 'سينمائي':
+        bar_h = 60
+        top_bar = ColorClip(size=(w, bar_h), color=(0,0,0), duration=duration).with_position(('center', 0))
+        bottom_bar = ColorClip(size=(w, bar_h), color=(0,0,0), duration=duration).with_position(('center', h - bar_h))
+        clips.extend([top_bar, bottom_bar])
+
+    # تقطيع النص إلى كلمات وحساب التوقيت المناسب لظهور كل كلمة
+    words = text.split()
+    seg_duration = duration / len(words) if words else duration
+    for i, word in enumerate(words):
+        word_clip = TextClip(
+            font=font_name, text=word, font_size=font_size, color=txt_rgb,
+            bg_color=(0,0,0,0.5), size=(w-100, None), method='caption'
+        ).with_position(('center', h-150)).with_start(i * seg_duration).with_duration(seg_duration)
+        clips.append(word_clip)
+
+    if DEFAULT_AVATAR and style != 'سينمائي':
+        try:
+            avatar_clip = VideoClip.from_image(DEFAULT_AVATAR, duration=duration).resized(height=150)
+            avatar_clip = avatar_clip.with_position(('center', 50))
+            clips.append(avatar_clip)
+        except:
+            pass
+
+    final_video = CompositeVideoClip(clips).with_audio(audio_clip)
+    final_video.write_videofile(output_path, fps=24, codec='libx264', audio_codec='aac')
+    return output_path
+
+# ==================================================
+# 5. واجهة المستخدم (HTML) وجلب البيانات
+# ==================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html dir="rtl" lang="ar">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-    <title>AI 文本转视频 - 一键生成短视频</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>مولد الفيديو الذكي - حوّل نصك إلى فيديو</title>
     <style>
-        * {
-            box-sizing: border-box;
-        }
-        body {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-            margin: 0;
-            padding: 20px;
-        }
-        .card {
-            background: rgba(255, 255, 255, 0.95);
-            border-radius: 32px;
-            box-shadow: 0 25px 45px -12px rgba(0,0,0,0.3);
-            max-width: 800px;
-            width: 100%;
-            padding: 2rem;
-            transition: all 0.3s ease;
-        }
-        h1 {
-            text-align: center;
-            color: #333;
-            margin-bottom: 0.5rem;
-            font-weight: 700;
-        }
-        .sub {
-            text-align: center;
-            color: #666;
-            margin-bottom: 2rem;
-            border-bottom: 1px solid #eee;
-            padding-bottom: 1rem;
-        }
-        textarea {
-            width: 100%;
-            padding: 15px;
-            font-size: 1rem;
-            border: 2px solid #e0e0e0;
-            border-radius: 24px;
-            font-family: inherit;
-            resize: vertical;
-            transition: border-color 0.2s;
-        }
-        textarea:focus {
-            outline: none;
-            border-color: #667eea;
-        }
-        .row {
-            display: flex;
-            gap: 20px;
-            margin: 20px 0;
-            flex-wrap: wrap;
-        }
-        .form-group {
-            flex: 1;
-            min-width: 150px;
-        }
-        label {
-            display: block;
-            margin-bottom: 8px;
-            font-weight: 600;
-            color: #444;
-        }
-        select, input {
-            width: 100%;
-            padding: 12px;
-            border: 2px solid #e0e0e0;
-            border-radius: 24px;
-            font-size: 0.95rem;
-            background: white;
-            cursor: pointer;
-        }
-        button {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            padding: 14px 28px;
-            font-size: 1.1rem;
-            font-weight: bold;
-            border-radius: 40px;
-            width: 100%;
-            cursor: pointer;
-            transition: transform 0.2s, box-shadow 0.2s;
-            margin-top: 10px;
-        }
-        button:hover:not(:disabled) {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px -5px rgba(102, 126, 234, 0.5);
-        }
-        button:disabled {
-            background: #aaa;
-            cursor: not-allowed;
-        }
-        .loading {
-            display: none;
-            text-align: center;
-            margin: 30px 0;
-            padding: 20px;
-            background: #f8f9fa;
-            border-radius: 32px;
-        }
-        .spinner {
-            border: 4px solid #f3f3f3;
-            border-top: 4px solid #667eea;
-            border-radius: 50%;
-            width: 40px;
-            height: 40px;
-            animation: spin 1s linear infinite;
-            margin: 0 auto 15px;
-        }
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-        .result {
-            display: none;
-            margin-top: 30px;
-            text-align: center;
-        }
-        video {
-            width: 100%;
-            border-radius: 20px;
-            box-shadow: 0 10px 25px -5px rgba(0,0,0,0.2);
-            margin-top: 15px;
-        }
-        .error {
-            display: none;
-            background: #fee2e2;
-            color: #b91c1c;
-            padding: 15px;
-            border-radius: 24px;
-            margin-top: 20px;
-            text-align: center;
-        }
-        footer {
-            text-align: center;
-            margin-top: 30px;
-            font-size: 0.8rem;
-            color: #aaa;
-        }
-        @media (max-width: 600px) {
-            .card { padding: 1.5rem; }
-            .row { flex-direction: column; gap: 15px; }
-        }
+        *{margin:0;padding:0;box-sizing:border-box;}
+        body{font-family:'Segoe UI',Tahoma;background:linear-gradient(135deg,#1e3c72,#2a5298);padding:20px;}
+        .container{max-width:950px;margin:auto;background:rgba(255,255,255,0.95);border-radius:30px;overflow:hidden;}
+        .header{background:linear-gradient(135deg,#667eea,#764ba2);color:white;padding:35px;text-align:center;}
+        .content{padding:35px;}
+        .form-group{margin-bottom:25px;}
+        label{display:block;font-weight:bold;margin-bottom:10px;}
+        textarea,select,input{width:100%;padding:14px;border:2px solid #e2e8f0;border-radius:16px;font-size:16px;}
+        .row{display:grid;grid-template-columns:1fr 1fr;gap:20px;}
+        button{width:100%;padding:16px;background:linear-gradient(135deg,#667eea,#764ba2);color:white;border:none;border-radius:40px;font-size:18px;cursor:pointer;}
+        .loading{display:none;text-align:center;padding:30px;background:#f1f5f9;border-radius:24px;margin-top:25px;}
+        .spinner{border:4px solid #e2e8f0;border-top:4px solid #667eea;border-radius:50%;width:45px;height:45px;animation:spin 0.8s linear infinite;margin:0 auto 15px;}
+        @keyframes spin{0%{transform:rotate(0deg);}100%{transform:rotate(360deg);}}
+        .result{display:none;margin-top:25px;padding:25px;background:#d1fae5;border-radius:24px;text-align:center;}
+        .error{display:none;background:#fee2e2;color:#b91c1c;padding:18px;border-radius:20px;margin-top:20px;text-align:center;}
+        .info{background:#e0f2fe;padding:18px;border-radius:20px;margin-top:25px;font-size:14px;text-align:center;}
+        @media(max-width:650px){.row{grid-template-columns:1fr;}}
     </style>
 </head>
 <body>
-<div class="card">
-    <h1>✨ AI 文本转视频 ✨</h1>
-    <div class="sub">将你的文字，变成带有音乐和动态字幕的短视频</div>
-
-    <div class="form-group">
-        <label>📝 输入你的文本内容</label>
-        <textarea id="textInput" rows="5" placeholder="例如：欢迎来到AI世界！这是一个由人工智能生成的视频，展示科技与创意的结合。"></textarea>
-    </div>
-
-    <div class="row">
-        <div class="form-group">
-            <label>🎨 背景主题</label>
-            <select id="bgColor">
-                <option value="#2c3e50">深蓝 (现代)</option>
-                <option value="#1a1a2e">暗黑 (酷炫)</option>
-                <option value="#ff6b6b">活力红 (热情)</option>
-                <option value="#4ecdc4">清新绿 (自然)</option>
-            </select>
+<div class="container">
+    <div class="header"><h1>🎬 صانع الفيديو الذكي</h1><p>حوّل أفكارك النصية إلى فيديو متحرك أو أغنية</p></div>
+    <div class="content">
+        <div class="form-group"><label>📝 النص المراد تحويله إلى فيديو</label><textarea id="text" rows="4" placeholder="اكتب قصتك، فكرتك، أو أغنية..."></textarea></div>
+        <div class="row">
+            <div class="form-group"><label>🎨 اختر النمط البصري</label>
+                <select id="style">
+                    <option value="عادي">📄 عادي (كلاسيكي)</option>
+                    <option value="كرتوني">🎈 كرتوني (مرح وجذاب)</option>
+                    <option value="سينمائي">🎞️ سينمائي (فيلمي)</option>
+                    <option value="أغنية">🎵 أغنية (ألوان دافئة)</option>
+                </select>
+            </div>
+            <div class="form-group"><label>🔊 تحويل النص إلى صوت تلقائي</label>
+                <select id="use_tts">
+                    <option value="true">✅ نعم، أضف صوتًا</option>
+                    <option value="false">❌ لا، فيديو صامت</option>
+                </select>
+            </div>
         </div>
-        <div class="form-group">
-            <label>🎬 视频时长 (秒)</label>
-            <input type="number" id="duration" value="8" min="5" max="30" step="1">
+        <div class="row">
+            <div class="form-group"><label>🎨 لون الخلفية (اختياري)</label><select id="bg_color"><option value="">-- افتراضي حسب النمط --</option><option value="أسود">أسود</option><option value="أبيض">أبيض</option><option value="أحمر">أحمر</option><option value="أزرق">أزرق</option><option value="أخضر">أخضر</option></select></div>
+            <div class="form-group"><label>✏️ لون النص (اختياري)</label><select id="txt_color"><option value="">-- افتراضي حسب النمط --</option><option value="أبيض">أبيض</option><option value="أسود">أسود</option><option value="أصفر">أصفر</option></select></div>
         </div>
+        <div class="row">
+            <div class="form-group"><label>⏱️ مدة الفيديو (ثواني) - للنص الثابت فقط</label><input type="number" id="duration" value="8" min="3" max="45"></div>
+            <div class="form-group"><label>🎬 نوع التزامن مع الصوت</label>
+                <select id="sync_type">
+                    <option value="static">نص ثابت (أسرع)</option>
+                    <option value="synced">نص متحرك مع الصوت (أغنية)</option>
+                </select>
+            </div>
+        </div>
+        <button id="generateBtn">✨ إنشاء الفيديو الآن ✨</button>
+        <div class="loading" id="loading"><div class="spinner"></div><p>جاري إنشاء الفيديو... قد يستغرق بضع دقائق.</p></div>
+        <div class="result" id="result"></div>
+        <div class="error" id="error"></div>
+        <div class="info">💡 يعمل هذا الموقع بدون أي مفاتيح API خارجية. يستخدم تقنيات مفتوحة المصدر (MoviePy + gTTS) لإنشاء فيديوهات عالية الجودة.</div>
     </div>
-
-    <button id="generateBtn">🚀 立即生成视频 🚀</button>
-
-    <div class="loading" id="loading">
-        <div class="spinner"></div>
-        <p>🤖 AI 正在努力创作中，这可能需要几十秒时间，请稍等...</p>
-    </div>
-
-    <div class="result" id="result">
-        <h3>✅ 生成成功！</h3>
-        <video id="videoPlayer" controls>
-            您的浏览器不支持 video 标签。
-        </video>
-        <a id="downloadLink" href="#" download="ai_video.mp4" style="display: inline-block; margin-top: 15px; background: #10b981; color: white; padding: 10px 20px; border-radius: 30px; text-decoration: none;">⬇️ 下载视频 ⬇️</a>
-    </div>
-
-    <div class="error" id="error"></div>
-    <footer>⚡ 基于 gTTS + MoviePy | 视频生成后自动保存 | 无需任何 API Key</footer>
 </div>
-
 <script>
-    const generateBtn = document.getElementById('generateBtn');
+    const genBtn = document.getElementById('generateBtn');
     const loadingDiv = document.getElementById('loading');
     const resultDiv = document.getElementById('result');
     const errorDiv = document.getElementById('error');
-    const videoPlayer = document.getElementById('videoPlayer');
-    const downloadLink = document.getElementById('downloadLink');
 
-    generateBtn.onclick = async () => {
-        const text = document.getElementById('textInput').value.trim();
-        if (!text) {
-            showError('❌ 请先输入文本内容！');
-            return;
-        }
-        const duration = parseFloat(document.getElementById('duration').value);
-        const bgColor = document.getElementById('bgColor').value;
-
+    genBtn.onclick = async () => {
+        const text = document.getElementById('text').value.trim();
+        if (!text) { showError('الرجاء إدخال النص أولاً.'); return; }
+        const data = {
+            text: text,
+            style: document.getElementById('style').value,
+            use_tts: document.getElementById('use_tts').value === 'true',
+            bg_color: document.getElementById('bg_color').value || null,
+            text_color: document.getElementById('txt_color').value || null,
+            duration: parseFloat(document.getElementById('duration').value),
+            sync_type: document.getElementById('sync_type').value
+        };
         showLoading(true);
         hideResult();
         hideError();
-
         try {
-            const response = await fetch('/generate', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: text, duration: duration, bg_color: bgColor })
-            });
-            const data = await response.json();
-            if (data.success) {
-                showResult(data.video_url);
-            } else {
-                showError(data.error || '生成失败，请重试。');
-            }
-        } catch (err) {
-            console.error(err);
-            showError('网络错误，无法连接到服务器。');
-        } finally {
-            showLoading(false);
-        }
+            const res = await fetch('/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+            const json = await res.json();
+            if (json.success) showResult(json.video_url);
+            else showError(json.error || 'حدث خطأ أثناء التوليد.');
+        } catch(e) { showError('فشل الاتصال بالخادم: ' + e.message); }
+        finally { showLoading(false); }
     };
-
-    function showLoading(show) {
-        loadingDiv.style.display = show ? 'block' : 'none';
-        generateBtn.disabled = show;
-    }
-    function showResult(videoUrl) {
-        videoPlayer.src = videoUrl;
-        downloadLink.href = videoUrl;
-        resultDiv.style.display = 'block';
-    }
+    function showLoading(s) { loadingDiv.style.display = s ? 'block' : 'none'; genBtn.disabled = s; }
+    function showResult(url) { resultDiv.innerHTML = `<p>✅ تم إنشاء الفيديو بنجاح!</p><a href="${url}" download>📥 تحميل الفيديو</a><br><video width="100%" controls src="${url}"></video>`; resultDiv.style.display = 'block'; }
     function hideResult() { resultDiv.style.display = 'none'; }
-    function showError(msg) {
-        errorDiv.innerText = msg;
-        errorDiv.style.display = 'block';
-        setTimeout(() => { errorDiv.style.display = 'none'; }, 5000);
-    }
+    function showError(msg) { errorDiv.innerHTML = `❌ ${msg}`; errorDiv.style.display = 'block'; }
     function hideError() { errorDiv.style.display = 'none'; }
 </script>
 </body>
 </html>
 """
 
-# --- 5. Flask 路由与后端逻辑 ---
 @app.route('/')
 def index():
-    """渲染主页面"""
     return render_template_string(HTML_TEMPLATE)
 
 @app.route('/generate', methods=['POST'])
 def generate_video():
-    """
-    处理视频生成请求
-    接收 JSON: { "text": "...", "duration": 8, "bg_color": "#2c3e50" }
-    返回 JSON: { "success": true, "video_url": "/static/output/xxx.mp4" }
-    """
     data = request.get_json()
     if not data or not data.get('text'):
-        return jsonify({'error': '缺少文本参数'}), 400
+        return jsonify({'error': 'الرجاء إدخال النص'}), 400
 
-    raw_text = data['text']
-    duration = int(data.get('duration', 8))
-    bg_color = data.get('bg_color', '#2c3e50')
+    text = data['text']
+    style = data.get('style', 'عادي')
+    use_tts = data.get('use_tts', True)
+    bg_color = data.get('bg_color')
+    txt_color = data.get('text_color')
+    duration = float(data.get('duration', 6))
+    sync_type = data.get('sync_type', 'static')
 
-    # 生成唯一文件名
-    video_id = str(uuid.uuid4())
-    output_filename = f'video_{video_id}.mp4'
-    output_path = os.path.join(OUTPUT_DIR, output_filename)
+    vid_id = str(uuid.uuid4())
+    video_path = os.path.join(OUTPUT_DIR, f'video_{vid_id}.mp4')
+    audio_path = os.path.join(OUTPUT_DIR, f'audio_{vid_id}.mp3') if use_tts else None
 
     try:
-        # 调用核心函数创建视频
-        create_text_animation_video(
-            text=raw_text,
-            output_path=output_path,
-            duration=duration,
-            bg_color=bg_color
-        )
-        video_url = f'/static/output/{output_filename}'
+        if use_tts and GTTS_AVAILABLE:
+            generate_audio(text, audio_path)
+        if sync_type == 'synced' and audio_path and os.path.exists(audio_path):
+            create_video_synced(text, audio_path, video_path, style, txt_color, bg_color)
+        else:
+            create_video_simple(text, video_path, duration, style, txt_color, bg_color, audio_path)
+        video_url = url_for('download_video', filename=os.path.basename(video_path), _external=True)
         return jsonify({'success': True, 'video_url': video_url})
     except Exception as e:
-        print(f"视频生成错误: {e}")
-        # 如果生成失败，尝试删除可能产生的半成品文件
-        if os.path.exists(output_path):
-            os.remove(output_path)
-        return jsonify({'error': f'视频生成失败: {str(e)}'}), 500
+        print(f"Error: {e}")
+        return jsonify({'error': str(e)}), 500
 
-# --- 6. 启动应用 (用于本地调试) ---
+@app.route('/download/<filename>')
+def download_video(filename):
+    file_path = os.path.join(OUTPUT_DIR, filename)
+    if os.path.exists(file_path):
+        return send_file(file_path, as_attachment=True)
+    return jsonify({'error': 'الملف غير موجود'}), 404
+
+# ==================================================
+# 6. تشغيل الخادم (لتجربته محليًا أو نشره)
+# ==================================================
 if __name__ == '__main__':
-    # Render 会自动设置 PORT 环境变量
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
