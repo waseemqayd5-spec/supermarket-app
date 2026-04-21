@@ -1,159 +1,447 @@
+"""
+المركز السيادي - ديوان محافظة عدن
+نظام متكامل لإدارة الإيرادات والرقابة الميدانية
+
+لتشغيل المشروع:
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+"""
+
 import os
-import datetime
-from flask import Flask, render_template_string, request, redirect, url_for, flash, jsonify, session
-from flask_sqlalchemy import SQLAlchemy
-from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
-from werkzeug.security import generate_password_hash, check_password_hash
-from functools import wraps
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Optional, List
+import enum
 
-# ----------------------- التهيئة الأساسية -----------------------
-app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', '7a8b3c9d1e2f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b')
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from pydantic_settings import BaseSettings
+from sqlalchemy import (
+    create_engine, Column, Integer, String, Float, Enum, DateTime, ForeignKey, Boolean
+)
+from sqlalchemy.sql import func
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session, relationship
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from dotenv import load_dotenv
 
-# تعديل المسار ليعمل على Vercel بدون أخطاء الصلاحيات
-if os.environ.get('VERCEL'):
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:////tmp/security_tax.db'
-else:
-    app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///security_tax.db'
+# ============================================================
+# إعدادات المشروع
+# ============================================================
+load_dotenv()
 
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+class Settings(BaseSettings):
+    PROJECT_NAME: str = "ديوان محافظة عدن - المركز السيادي"
+    VERSION: str = "1.0.0"
+    API_V1_STR: str = "/api/v1"
 
-db = SQLAlchemy(app)
-login_manager = LoginManager()
-login_manager.init_app(app)
-login_manager.login_view = 'login'
+    SECRET_KEY: str = os.getenv("SECRET_KEY", "aden-sovereign-secret-key-change-in-production")
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
 
-CONTROLLER_PHONE = "967770295876"
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./sovereign_center.db")
 
-# ----------------------- نماذج قاعدة البيانات -----------------------
-class User(UserMixin, db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
-    password_hash = db.Column(db.String(200), nullable=False)
-    role = db.Column(db.String(20), default='viewer')
-    full_name = db.Column(db.String(100))
+    SOVEREIGN_MOBILE: str = "967770295876"
 
-    def set_password(self, password):
-        self.password_hash = generate_password_hash(password)
+    class Config:
+        case_sensitive = True
 
-    def check_password(self, password):
-        return check_password_hash(self.password_hash, password)
+settings = Settings()
 
-class Governorate(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(50), unique=True, nullable=False)
-    districts = db.relationship('District', backref='governorate', lazy=True)
+# ============================================================
+# قاعدة البيانات
+# ============================================================
+engine = create_engine(
+    settings.DATABASE_URL,
+    connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {}
+)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
 
-class District(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(50), nullable=False)
-    governorate_id = db.Column(db.Integer, db.ForeignKey('governorate.id'), nullable=False)
-    shops = db.relationship('Shop', backref='district', lazy=True)
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-class Shop(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    owner_name = db.Column(db.String(100))
-    tax_number = db.Column(db.String(50), unique=True)
-    district_id = db.Column(db.Integer, db.ForeignKey('district.id'), nullable=False)
-    tax_payments = db.relationship('TaxPayment', backref='shop', lazy=True)
+# ============================================================
+# نماذج قاعدة البيانات
+# ============================================================
+class UserRole(str, enum.Enum):
+    GOVERNOR = "governor"
+    DISTRICT_MAYOR = "district_mayor"
+    COLLECTOR = "collector"
 
-class TaxPayment(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    amount = db.Column(db.Float, nullable=False)
-    date = db.Column(db.DateTime, default=datetime.datetime.utcnow)
-    shop_id = db.Column(db.Integer, db.ForeignKey('shop.id'), nullable=False)
+class ShopCategory(str, enum.Enum):
+    A = "أ - ممتاز"
+    B = "ب - متوسط"
+    C = "ج - صغير"
 
-# ----------------------- القوالب والواجهات -----------------------
-BASE_TEMPLATE = '''
-<!DOCTYPE html>
-<html dir="rtl" lang="ar">
-<head>
-    <meta charset="UTF-8">
-    <title>النظام الأمني والضريبي</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <style>
-        body { background-color: #f8f9fa; font-family: 'Arial', sans-serif; }
-        .navbar { margin-bottom: 20px; }
-        .footer { text-align: center; padding: 20px; color: #666; }
-    </style>
-</head>
-<body>
-    <nav class="navbar navbar-dark bg-dark">
-        <div class="container">
-            <a class="navbar-brand" href="/">نظام الرقابة المتكامل</a>
-            {% if current_user.is_authenticated %}
-            <a href="/logout" class="btn btn-outline-light btn-sm">تسجيل خروج</a>
-            {% endif %}
-        </div>
-    </nav>
-    <div class="container">
-        {% with messages = get_flashed_messages() %}
-          {% if messages %}{% for msg in messages %}<div class="alert alert-info">{{ msg }}</div>{% endfor %}{% endif %}
-        {% endwith %}
-        {% block content %}{% endblock %}
-    </div>
-    <div class="footer">للدعم الفني اتصل بـ: {{ phone }}</div>
-</body>
-</html>
-'''
+class ShopStatus(str, enum.Enum):
+    ACTIVE = "نشط"
+    INACTIVE = "غير نشط"
+    BLOCKED = "محظور"
 
-# ----------------------- المسارات (Routes) -----------------------
-@login_manager.user_loader
-def load_user(user_id):
-    return User.query.get(int(user_id))
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    phone = Column(String(20), unique=True, index=True, nullable=False)
+    full_name = Column(String(100), nullable=False)
+    hashed_password = Column(String(200), nullable=False)
+    role = Column(Enum(UserRole), default=UserRole.COLLECTOR)
+    district_id = Column(Integer, ForeignKey("districts.id"), nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-@app.route('/')
-@login_required
-def dashboard():
-    shops = Shop.query.all()
-    return render_template_string('''
-        {% extends "base" %}
-        {% block content %}
-        <h2>لوحة التحكم</h2>
-        <div class="row mt-4">
-            <div class="col-md-4"><div class="card p-3 shadow-sm">إجمالي المحلات: {{ shops|length }}</div></div>
-        </div>
-        {% endblock %}
-    ''', base=BASE_TEMPLATE, shops=shops, phone=CONTROLLER_PHONE)
+class District(Base):
+    __tablename__ = "districts"
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String(10), unique=True, nullable=False)
+    name = Column(String(100), nullable=False)
+    mayor_name = Column(String(100))
+    mayor_phone = Column(String(20))
+    geo_fence_data = Column(String(500), nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if request.method == 'POST':
-        user = User.query.filter_by(username=request.form['username']).first()
-        if user and user.check_password(request.form['password']):
-            login_user(user)
-            return redirect(url_for('dashboard'))
-        flash('اسم المستخدم أو كلمة المرور غير صحيحة')
-    return render_template_string('''
-        {% extends "base" %}
-        {% block content %}
-        <div class="row justify-content-center">
-            <div class="col-md-4">
-                <form method="post" class="card p-4 shadow">
-                    <h3 class="text-center mb-3">دخول</h3>
-                    <input type="text" name="username" class="form-control mb-2" placeholder="اسم المستخدم" required>
-                    <input type="password" name="password" class="form-control mb-3" placeholder="كلمة المرور" required>
-                    <button class="btn btn-primary w-100">دخول</button>
-                </form>
-            </div>
-        </div>
-        {% endblock %}
-    ''', base=BASE_TEMPLATE, phone=CONTROLLER_PHONE)
+    shops = relationship("Shop", back_populates="district")
 
-@app.route('/logout')
-def logout():
-    logout_user()
-    return redirect(url_for('login'))
+class Shop(Base):
+    __tablename__ = "shops"
+    id = Column(Integer, primary_key=True, index=True)
+    unique_code = Column(String(20), unique=True, index=True, nullable=False)
+    district_id = Column(Integer, ForeignKey("districts.id"), nullable=False)
 
-# ----------------------- تشغيل التطبيق -----------------------
-if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
-        # إضافة مستخدم أدمن افتراضي إذا لم يوجد
-        if not User.query.filter_by(username='admin').first():
-            admin = User(username='admin', full_name='المدير العام', role='admin')
-            admin.set_password('admin123')
-            db.session.add(admin)
-            db.session.commit()
-    app.run(debug=True)
+    commercial_name = Column(String(200), nullable=False)
+    activity_type = Column(String(100), nullable=False)
+    commercial_register = Column(String(50))
+    owner_name = Column(String(100), nullable=False)
+    owner_phone = Column(String(20), nullable=False)
+    owner_email = Column(String(100))
+
+    address_text = Column(String(500))
+    latitude = Column(Float, nullable=False)
+    longitude = Column(Float, nullable=False)
+
+    category = Column(Enum(ShopCategory), default=ShopCategory.B)
+    monthly_fee = Column(Float, default=0.0)
+
+    status = Column(Enum(ShopStatus), default=ShopStatus.ACTIVE)
+    qr_code_data = Column(String(500))
+    ussd_string = Column(String(50))
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    district = relationship("District", back_populates="shops")
+
+class Transaction(Base):
+    __tablename__ = "transactions"
+    id = Column(Integer, primary_key=True, index=True)
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
+    collector_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    amount = Column(Float, nullable=False)
+    payment_method = Column(String(50))
+    latitude = Column(Float)
+    longitude = Column(Float)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+# ============================================================
+# الأمان والصلاحيات
+# ============================================================
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+class RBAC:
+    ROLES = {
+        "governor": ["read:all", "write:all", "delete:all"],
+        "district_mayor": ["read:district", "write:district"],
+        "collector": ["read:assigned", "write:collection"],
+    }
+
+    @staticmethod
+    def has_permission(user_role: str, required_permission: str) -> bool:
+        return required_permission in RBAC.ROLES.get(user_role, [])
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return encoded_jwt
+
+def decode_token(token: str) -> dict:
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        return payload
+    except JWTError:
+        return None
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+
+# ============================================================
+# نماذج Pydantic (للتحقق من البيانات)
+# ============================================================
+class UserBase(BaseModel):
+    phone: str
+    full_name: str
+    role: UserRole
+    district_id: Optional[int] = None
+
+class UserCreate(UserBase):
+    password: str
+
+class UserResponse(UserBase):
+    id: int
+    is_active: bool
+    created_at: datetime
+    class Config:
+        from_attributes = True
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class DistrictBase(BaseModel):
+    code: str
+    name: str
+    mayor_name: Optional[str] = None
+    mayor_phone: Optional[str] = None
+
+class DistrictCreate(DistrictBase):
+    pass
+
+class DistrictResponse(DistrictBase):
+    id: int
+    is_active: bool
+    created_at: datetime
+    class Config:
+        from_attributes = True
+
+class ShopBase(BaseModel):
+    commercial_name: str
+    activity_type: str
+    commercial_register: Optional[str] = None
+    owner_name: str
+    owner_phone: str
+    owner_email: Optional[str] = None
+    address_text: Optional[str] = None
+    latitude: float
+    longitude: float
+    category: ShopCategory = ShopCategory.B
+    monthly_fee: float
+
+class ShopCreate(ShopBase):
+    district_id: int
+
+class ShopResponse(ShopBase):
+    id: int
+    unique_code: str
+    district_id: int
+    status: ShopStatus
+    qr_code_data: Optional[str] = None
+    ussd_string: Optional[str] = None
+    created_at: datetime
+    class Config:
+        from_attributes = True
+
+class AlertRequest(BaseModel):
+    level: str
+    message: str
+    district_id: Optional[int] = None
+    shop_id: Optional[int] = None
+
+# ============================================================
+# خدمة التنبيهات للرقم السيادي
+# ============================================================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def send_sovereign_alert(level: str, message: str, district_id: int = None, shop_id: int = None):
+    """محاكاة إرسال تنبيه إلى الرقم السيادي 967770295876"""
+    log_message = (
+        f"🚨 [SOVEREIGN ALERT] Level: {level} | "
+        f"To: {settings.SOVEREIGN_MOBILE} | "
+        f"District: {district_id} | Shop: {shop_id} | "
+        f"Message: {message}"
+    )
+    logger.warning(log_message)
+    return {"status": "logged", "to": settings.SOVEREIGN_MOBILE}
+
+# ============================================================
+# دوال مساعدة
+# ============================================================
+def generate_unique_code(district_code: str, db: Session) -> str:
+    last = db.query(Shop).filter(Shop.unique_code.like(f"{district_code}-%")).order_by(Shop.id.desc()).first()
+    if last:
+        num = int(last.unique_code.split("-")[-1]) + 1
+    else:
+        num = 1
+    return f"{district_code}-{num:04d}"
+
+# ============================================================
+# إنشاء تطبيق FastAPI
+# ============================================================
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    version=settings.VERSION,
+    description="نظام المركز السيادي لإدارة إيرادات محافظة عدن"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ============================================================
+# إنشاء الجداول تلقائياً
+# ============================================================
+Base.metadata.create_all(bind=engine)
+
+# ============================================================
+# نقاط النهاية (API Endpoints)
+# ============================================================
+API_V1 = settings.API_V1_STR
+
+# ---------- المصادقة ----------
+@app.post(f"{API_V1}/auth/register", response_model=UserResponse, tags=["Authentication"])
+def register(user_data: UserCreate, db: Session = Depends(get_db)):
+    existing = db.query(User).filter(User.phone == user_data.phone).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="رقم الهاتف مسجل مسبقاً")
+    hashed = get_password_hash(user_data.password)
+    new_user = User(
+        phone=user_data.phone,
+        full_name=user_data.full_name,
+        hashed_password=hashed,
+        role=user_data.role,
+        district_id=user_data.district_id
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+@app.post(f"{API_V1}/auth/login", response_model=Token, tags=["Authentication"])
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.phone == form_data.username).first()
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="رقم الهاتف أو كلمة المرور غير صحيحة")
+    access_token = create_access_token(
+        data={"sub": user.phone, "role": user.role.value, "district_id": user.district_id}
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+# ---------- المديريات ----------
+@app.post(f"{API_V1}/districts/", response_model=DistrictResponse, tags=["Districts"])
+def create_district(district: DistrictCreate, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    payload = decode_token(token)
+    if not payload or not RBAC.has_permission(payload.get("role"), "write:all"):
+        raise HTTPException(status_code=403, detail="غير مصرح")
+    db_district = District(**district.dict())
+    db.add(db_district)
+    db.commit()
+    db.refresh(db_district)
+    return db_district
+
+@app.get(f"{API_V1}/districts/", response_model=List[DistrictResponse], tags=["Districts"])
+def list_districts(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401)
+    return db.query(District).all()
+
+# ---------- المحلات ----------
+@app.post(f"{API_V1}/shops/", response_model=ShopResponse, tags=["Shops"])
+def create_shop(shop: ShopCreate, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401)
+    role = payload.get("role")
+    user_district = payload.get("district_id")
+    if not (RBAC.has_permission(role, "write:all") or (RBAC.has_permission(role, "write:district") and user_district == shop.district_id)):
+        raise HTTPException(status_code=403, detail="غير مصرح")
+
+    district = db.query(District).filter(District.id == shop.district_id).first()
+    if not district:
+        raise HTTPException(status_code=404, detail="المديرية غير موجودة")
+
+    unique_code = generate_unique_code(district.code, db)
+    ussd = f"*159*{unique_code.split('-')[-1]}#"
+    qr_data = f"ADEN:SHOP:{unique_code}"
+
+    new_shop = Shop(
+        **shop.dict(),
+        unique_code=unique_code,
+        qr_code_data=qr_data,
+        ussd_string=ussd
+    )
+    db.add(new_shop)
+    db.commit()
+    db.refresh(new_shop)
+    return new_shop
+
+@app.get(f"{API_V1}/shops/", response_model=List[ShopResponse], tags=["Shops"])
+def list_shops(district_id: int = None, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401)
+    query = db.query(Shop)
+    if district_id:
+        query = query.filter(Shop.district_id == district_id)
+    return query.all()
+
+# ---------- التقارير والتنبيهات ----------
+@app.post(f"{API_V1}/alerts/test", tags=["Reports & Alerts"])
+def test_alert(alert: AlertRequest, token: str = Depends(oauth2_scheme)):
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401)
+    send_sovereign_alert(alert.level, alert.message, alert.district_id, alert.shop_id)
+    return {"status": "alert sent", "to": settings.SOVEREIGN_MOBILE}
+
+@app.get(f"{API_V1}/reports/daily-summary", tags=["Reports & Alerts"])
+def daily_summary(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401)
+    districts = db.query(District).all()
+    summary = []
+    for d in districts:
+        shops_count = db.query(Shop).filter(Shop.district_id == d.id).count()
+        summary.append({"district": d.name, "shops": shops_count})
+    return {"date": datetime.now().strftime("%Y-%m-%d"), "districts": summary, "sovereign_mobile": settings.SOVEREIGN_MOBILE}
+
+# ---------- الصفحة الرئيسية والفحص ----------
+@app.get("/")
+def root():
+    return {
+        "message": "مرحباً بك في نظام المركز السيادي - ديوان محافظة عدن",
+        "docs": "/docs",
+        "sovereign_mobile": settings.SOVEREIGN_MOBILE
+    }
+
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
+
+# ============================================================
+# تشغيل التطبيق مباشرة (للتجربة المحلية)
+# ============================================================
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
