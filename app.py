@@ -515,7 +515,7 @@ def add_shop():
 
 @app.route('/atms')
 @login_required
-def atms():
+def atms(): 
     atms_list = ATM.query.all()
     return render_template_string('{% extends "BASE" %}{% block content %}<h3>الصرافات</h3><a href="/atm/add" class="btn btn-success">إضافة صراف</a><table class="table"><tr><th>الاسم</th><th>الموقع</th><th>المديرية</th></tr>{% for a in atms_list %}<tr><td>{{ a.name }}</td><td>{{ a.location }}</td><td>{{ a.district.name }}</td></tr>{% endfor %}</table>{% endblock %}', BASE=BASE_TEMPLATE, atms_list=atms_list)
 
