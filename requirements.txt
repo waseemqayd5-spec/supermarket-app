@@ -13,4 +13,3 @@ beautifulsoup4==4.12.3
 gunicorn==21.2.0
 eventlet==0.35.2
 python-socketio==5.11.4
-# لا تضع gevent أو greenlet
